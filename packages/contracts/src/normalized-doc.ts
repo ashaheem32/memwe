@@ -34,7 +34,7 @@ export const Acl = z.object({
   readers: z.array(z.string()).default([]),
   public: z.boolean().default(false),
   source: z.string().optional(),
-  syncedAt: z.string().datetime().optional(),
+  syncedAt: z.iso.datetime().optional(),
 });
 export type Acl = z.infer<typeof Acl>;
 
@@ -55,11 +55,11 @@ export const NormalizedDoc = z.object({
   mime: z.string().nullable().default(null),
 
   /** World time — when the content is *about*, not when we ingested it. */
-  occurredAt: z.string().datetime().nullable().default(null),
+  occurredAt: z.iso.datetime().nullable().default(null),
 
   acl: Acl.default({ owners: [], readers: [], public: false }),
   trust: TrustTier.default("first_party"),
-  metadata: z.record(z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type NormalizedDoc = z.infer<typeof NormalizedDoc>;
 
@@ -74,12 +74,14 @@ export const DocStatus = z.enum([
 ]);
 export type DocStatus = z.infer<typeof DocStatus>;
 
-export const IngestRequest = z.object({
-  container: ContainerTag,
-  content: z.string().max(1_000_000).optional(),
-  url: z.string().url().optional(),
-  customId: z.string().max(255).optional(),
-  title: z.string().max(500).optional(),
-  metadata: z.record(z.unknown()).optional(),
-});
+export const IngestRequest = z
+  .object({
+    container: ContainerTag,
+    content: z.string().max(1_000_000).optional(),
+    url: z.url().optional(),
+    customId: z.string().max(255).optional(),
+    title: z.string().max(500).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .meta({ id: "IngestRequest" });
 export type IngestRequest = z.infer<typeof IngestRequest>;

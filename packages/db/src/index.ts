@@ -10,8 +10,8 @@ const VECTOR_OID_QUERY = `select oid from pg_type where typname = 'vector'`;
  * legitimately works across tenants. Never use it for a request.
  */
 export const pool = new Pool({
-  connectionString: process.env["DATABASE_URL"] ?? "postgres://memwe:memwe@localhost:5432/memwe",
-  max: Number(process.env["PG_POOL_MAX"] ?? 10),
+  connectionString: process.env.DATABASE_URL ?? "postgres://memwe:memwe@localhost:5432/memwe",
+  max: Number(process.env.PG_POOL_MAX ?? 10),
   idleTimeoutMillis: 30_000,
 });
 
@@ -22,8 +22,8 @@ export const pool = new Pool({
  */
 export const appPool = new Pool({
   connectionString:
-    process.env["APP_DATABASE_URL"] ?? "postgres://memwe_app:memwe_app@localhost:5432/memwe",
-  max: Number(process.env["PG_APP_POOL_MAX"] ?? 20),
+    process.env.APP_DATABASE_URL ?? "postgres://memwe_app:memwe_app@localhost:5432/memwe",
+  max: Number(process.env.PG_APP_POOL_MAX ?? 20),
   idleTimeoutMillis: 30_000,
 });
 

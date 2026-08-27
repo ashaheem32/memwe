@@ -1,23 +1,29 @@
 import { createHash } from "node:crypto";
-import { pool } from "@memwe/db";
+import * as cache from "@memwe/cache";
 import { MemweError } from "@memwe/contracts";
+import { pool } from "@memwe/db";
 
 export type Principal = { orgId: string; keyId: string; containerScope: string | null };
 
-const cache = new Map<string, { p: Principal; exp: number }>();
-const TTL_MS = 30_000;
+const TTL_SECONDS = 300;
+
+/** Never key the cache on the raw secret. */
+function cacheKey(key: string): string {
+  return `apikey:${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
+}
 
 /**
- * API key lookup: prefix-indexed, then constant-work hash compare.
- * Cached briefly in-process — Redis in Sprint 1, but a 30s memo already
- * takes this off the hot path.
+ * API key lookup: prefix-indexed, then a hash compare, then cached in
+ * Redis so every API instance shares one answer. The cache degrades to
+ * in-process if Redis is down — see @memwe/cache.
  */
 export async function authenticate(header: string | undefined): Promise<Principal> {
   const key = header?.replace(/^Bearer\s+/i, "").trim();
   if (!key) throw new MemweError("unauthorized", "missing Authorization header");
 
-  const hit = cache.get(key);
-  if (hit && hit.exp > Date.now()) return hit.p;
+  const ck = cacheKey(key);
+  const cached = await cache.get(ck);
+  if (cached) return JSON.parse(cached) as Principal;
 
   const prefix = key.slice(0, 11);
   const hash = createHash("sha256").update(key).digest();
@@ -37,9 +43,17 @@ export async function authenticate(header: string | undefined): Promise<Principa
   if (!row?.ok) throw new MemweError("unauthorized", "invalid API key");
 
   const p: Principal = { orgId: row.org_id, keyId: row.id, containerScope: row.container_scope };
-  cache.set(key, { p, exp: Date.now() + TTL_MS });
+  await cache.set(ck, JSON.stringify(p), TTL_SECONDS);
   void pool.query(`update api_keys set last_used_at = now() where id = $1`, [row.id]);
   return p;
+}
+
+/**
+ * Revoking a key must stop it working everywhere at once, not after each
+ * instance's TTL happens to lapse. This is why the cache is shared.
+ */
+export async function revoke(key: string): Promise<void> {
+  await cache.del(cacheKey(key));
 }
 
 /** Container tags are an authorization boundary, not just a namespace. */

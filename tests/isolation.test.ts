@@ -1,17 +1,20 @@
-import { afterAll, describe, expect, it } from "vitest";
-import { pool, withTenant, close } from "@memwe/db";
 import { CONTAINER_TAG_RE } from "@memwe/contracts";
+import { close, pool, withTenant } from "@memwe/db";
+import { afterAll, describe, expect, it } from "vitest";
 
 const ORG_A = "11111111-1111-1111-1111-111111111111";
 const ORG_B = "22222222-2222-2222-2222-222222222222";
 
-afterAll(async () => { await close(); });
+afterAll(async () => {
+  await close();
+});
 
 describe("tenant isolation", () => {
   it("RLS hides another org's documents", async () => {
     const asA = await withTenant({ orgId: ORG_A }, async (c) => {
       const { rows } = await c.query<{ n: string }>(
-        "select count(*)::text as n from documents where org_id = $1", [ORG_B],
+        "select count(*)::text as n from documents where org_id = $1",
+        [ORG_B],
       );
       return Number(rows[0]!.n);
     });

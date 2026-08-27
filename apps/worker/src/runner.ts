@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { JOB_PAYLOAD, isRetryable, MemweError } from "@memwe/contracts";
 import type { Job } from "@memwe/contracts";
+import { isRetryable, JOB_PAYLOAD, MemweError } from "@memwe/contracts";
+import { log } from "./log.js";
 import { queue } from "./queue.js";
 import { STAGES } from "./stages/index.js";
-import { log } from "./log.js";
 
-const CONCURRENCY = Number(process.env["WORKER_CONCURRENCY"] ?? 4);
-const POLL_MS = Number(process.env["WORKER_POLL_MS"] ?? 500);
-const HEARTBEAT_MS = Number(process.env["WORKER_HEARTBEAT_MS"] ?? 5000);
+const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4);
+const POLL_MS = Number(process.env.WORKER_POLL_MS ?? 500);
+const HEARTBEAT_MS = Number(process.env.WORKER_HEARTBEAT_MS ?? 5000);
 const STALE_MS = HEARTBEAT_MS * 6;
 
 /** Exponential with jitter, capped at 5 minutes. */

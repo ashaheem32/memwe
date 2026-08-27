@@ -15,7 +15,9 @@ for (;;) {
   } catch {
     await client.end().catch(() => {});
     if (Date.now() > deadline) {
-      process.stdout.write("\n  postgres did not come up in 60s. Is `docker compose up -d` running?\n");
+      process.stdout.write(
+        "\n  postgres did not come up in 60s. Is `docker compose up -d` running?\n",
+      );
       process.exit(1);
     }
     process.stdout.write(".");

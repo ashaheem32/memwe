@@ -1,0 +1,7 @@
+Shaheem's notes 🧠
+Arabic: مرحبا بالعالم — this is right-to-left.
+Hebrew: שלום עולם
+Devanagari: नमस्ते दुनिया
+Combining: é vs é (precomposed vs decomposed)
+ZWJ family: 👨‍👩‍👧‍👦  flags: 🇮🇳 🇦🇪
+Chunk boundaries must not split a grapheme cluster.

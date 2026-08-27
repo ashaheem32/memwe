@@ -1,6 +1,6 @@
-import { installVectorParser, close } from "@memwe/db";
-import { Runner } from "./runner.js";
+import { close, installVectorParser } from "@memwe/db";
 import { log } from "./log.js";
+import { Runner } from "./runner.js";
 
 const runner = new Runner();
 

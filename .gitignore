@@ -11,3 +11,4 @@ coverage/
 ._*
 .Spotlight-V100/
 .Trashes/
+fixtures/large.txt

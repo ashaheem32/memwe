@@ -1,5 +1,5 @@
-import { pool } from "@memwe/db";
 import type { Job, JobType } from "@memwe/contracts";
+import { pool } from "@memwe/db";
 
 /**
  * The queue interface. Everything the runner uses lives here, so

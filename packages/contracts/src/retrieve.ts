@@ -14,7 +14,7 @@ export const SearchMode = z.enum(["memories", "chunks", "hybrid"]);
 export type SearchMode = z.infer<typeof SearchMode>;
 
 export const RetrieveParams = z.object({
-  orgId: z.string().uuid(),
+  orgId: z.guid(),
   container: ContainerTag,
   query: z.string().min(1),
 
@@ -30,9 +30,9 @@ export const RetrieveParams = z.object({
   includeSuperseded: z.boolean().default(false),
 
   /** Point-in-time read. World time, not record time. (Sprint 5+) */
-  asOf: z.string().datetime().optional(),
+  asOf: z.iso.datetime().optional(),
 
-  filters: z.record(z.unknown()).optional(),
+  filters: z.record(z.string(), z.unknown()).optional(),
   include: z
     .object({
       documents: z.boolean().default(false),

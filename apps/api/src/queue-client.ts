@@ -1,5 +1,5 @@
-import { pool } from "@memwe/db";
 import type { JobType } from "@memwe/contracts";
+import { pool } from "@memwe/db";
 
 /**
  * The API's write side of the queue. Deliberately not importing the

@@ -1,41 +1,71 @@
 import { createHash, randomUUID } from "node:crypto";
-import { Hono } from "hono";
+import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import {
+  DocumentDetail,
+  DocumentList,
+  ErrorResponse,
+  IngestRequest,
+  IngestResponse,
+  MemweError,
+  UploadRequest,
+  UploadResponse,
+} from "@memwe/contracts";
 import { withTenant } from "@memwe/db";
-import { IngestRequest, MemweError } from "@memwe/contracts";
-import { assertContainerAllowed } from "../auth.js";
+import { blobKey, objectExists, presignedPut } from "@memwe/storage";
 import type { Principal } from "../auth.js";
+import { assertContainerAllowed } from "../auth.js";
 import { enqueue } from "../queue-client.js";
 
 type Env = { Variables: { principal: Principal; traceId: string } };
 
-export const documents = new Hono<Env>();
+export const documents = new OpenAPIHono<Env>();
 
-/**
- * POST /v1/documents — accept, dedupe, enqueue, return 202 in under 40ms.
- * The whole pipeline is asynchronous behind this; the document row is
- * the state machine.
- */
-documents.post("/", async (c) => {
+const json = (schema: z.ZodTypeAny, description: string) => ({
+  description,
+  content: { "application/json": { schema } },
+});
+const errors = {
+  400: json(ErrorResponse, "Validation failed"),
+  401: json(ErrorResponse, "Missing or invalid API key"),
+  403: json(ErrorResponse, "Key is not scoped to this container"),
+  404: json(ErrorResponse, "Not found"),
+};
+
+const UPLOAD_TTL = 900;
+
+// ---------------------------------------------------------------- ingest
+const ingestRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["documents"],
+  summary: "Ingest a document",
+  description:
+    "Accepts text or a URL, dedupes by content hash, and returns 202 immediately. " +
+    "The pipeline runs asynchronously; poll the document for status.",
+  request: { body: { content: { "application/json": { schema: IngestRequest } } } },
+  responses: { 202: json(IngestResponse, "Accepted for processing"), ...errors },
+});
+
+documents.openapi(ingestRoute, async (c) => {
   const p = c.get("principal");
   const traceId = c.get("traceId");
-  const body = IngestRequest.parse(await c.req.json());
+  const body = c.req.valid("json");
   assertContainerAllowed(p, body.container);
 
   if (!body.content && !body.url) {
     throw new MemweError("invalid_request", "one of `content` or `url` is required");
   }
 
-  const raw = body.content ?? body.url ?? "";
-  const contentHash = createHash("sha256").update(raw).digest();
+  const contentHash = createHash("sha256")
+    .update(body.content ?? body.url ?? "")
+    .digest();
 
   // withTenant, never pool.query: RLS is the isolation boundary, and a
   // WHERE clause you have to remember is not a boundary at all.
   const result = await withTenant({ orgId: p.orgId, container: body.container }, async (client) => {
-    // Dedupe by content hash: duplicate content is never re-billed and
-    // never re-processed. Returns the existing id synchronously.
     const existing = await client.query<{ id: string; status: string }>(
       `select id::text, status::text from documents
-        where org_id=$1 and container=$2 and content_hash=$3`,
+          where org_id = $1 and container = $2 and content_hash = $3`,
       [p.orgId, body.container, contentHash],
     );
     const found = existing.rows[0];
@@ -44,8 +74,8 @@ documents.post("/", async (c) => {
     const id = randomUUID();
     await client.query(
       `insert into documents (id, org_id, container, custom_id, title, markdown, source_uri,
-                              content_hash, mime, source, metadata, status)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'api',$10,'queued')`,
+                                content_hash, mime, source, metadata, status)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'api',$10,'queued')`,
       [
         id,
         p.orgId,
@@ -71,28 +101,144 @@ documents.post("/", async (c) => {
     });
   }
 
-  return c.json({ id: result.id, status: result.status, deduped: result.deduped }, 202);
+  return c.json(IngestResponse.parse(result), 202);
 });
 
-documents.get("/:id", async (c) => {
+// ---------------------------------------------------------------- upload
+const uploadRoute = createRoute({
+  method: "post",
+  path: "/upload",
+  tags: ["documents"],
+  summary: "Request a presigned upload URL",
+  description:
+    "Returns a URL to PUT the file bytes to directly. The file never passes through " +
+    "the API. Call /upload/{id}/complete once the PUT succeeds.",
+  request: { body: { content: { "application/json": { schema: UploadRequest } } } },
+  responses: { 200: json(UploadResponse, "Presigned URL issued"), ...errors },
+});
+
+documents.openapi(uploadRoute, async (c) => {
   const p = c.get("principal");
+  const body = c.req.valid("json");
+  assertContainerAllowed(p, body.container);
+
+  const id = randomUUID();
+  const key = blobKey(p.orgId, id);
+
+  // The hash of the *pending* blob key, not the bytes — we haven't seen
+  // them yet. Stage 02 replaces this with the real content hash once the
+  // blob is read, which is where dedupe for uploads actually happens.
+  const placeholderHash = createHash("sha256").update(key).digest();
+
+  await withTenant({ orgId: p.orgId, container: body.container }, async (client) => {
+    await client.query(
+      `insert into documents (id, org_id, container, custom_id, title, blob_key,
+                              content_hash, mime, source, status)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,'upload','queued')`,
+      [
+        id,
+        p.orgId,
+        body.container,
+        body.customId ?? null,
+        body.filename,
+        key,
+        placeholderHash,
+        body.contentType,
+      ],
+    );
+  });
+
+  return c.json(
+    UploadResponse.parse({
+      id,
+      uploadUrl: await presignedPut(key, body.contentType, UPLOAD_TTL),
+      expiresInSeconds: UPLOAD_TTL,
+    }),
+    200,
+  );
+});
+
+const completeRoute = createRoute({
+  method: "post",
+  path: "/upload/{id}/complete",
+  tags: ["documents"],
+  summary: "Confirm an upload and start processing",
+  request: { params: z.object({ id: z.guid() }) },
+  responses: { 202: json(IngestResponse, "Queued for processing"), ...errors },
+});
+
+documents.openapi(completeRoute, async (c) => {
+  const p = c.get("principal");
+  const traceId = c.get("traceId");
+  const { id } = c.req.valid("param");
+
+  const doc = await withTenant({ orgId: p.orgId }, async (client) => {
+    const r = await client.query<{ id: string; container: string; blob_key: string | null }>(
+      `select id::text, container, blob_key from documents where id = $1`,
+      [id],
+    );
+    return r.rows[0];
+  });
+  if (!doc) throw new MemweError("not_found", "document not found");
+  if (!doc.blob_key) throw new MemweError("invalid_request", "document has no pending upload");
+
+  // Trust the storage layer, not the client's word that the PUT worked.
+  if (!(await objectExists(doc.blob_key))) {
+    throw new MemweError(
+      "invalid_request",
+      "no object at the presigned key — did the PUT succeed?",
+    );
+  }
+
+  await enqueue({
+    type: "document.accept",
+    payload: { orgId: p.orgId, container: doc.container, traceId, documentId: id },
+    traceId,
+    dedupeKey: `accept:${id}`,
+  });
+
+  return c.json(IngestResponse.parse({ id, status: "queued", deduped: false }), 202);
+});
+
+// ------------------------------------------------------------------ read
+const getRoute = createRoute({
+  method: "get",
+  path: "/{id}",
+  tags: ["documents"],
+  summary: "Get a document",
+  request: { params: z.object({ id: z.guid() }) },
+  responses: { 200: json(DocumentDetail, "The document"), ...errors },
+});
+
+documents.openapi(getRoute, async (c) => {
+  const p = c.get("principal");
+  const { id } = c.req.valid("param");
   const rows = await withTenant({ orgId: p.orgId }, async (client) => {
     const r = await client.query(
       `select id::text, container, title, status::text, token_count, stage_error,
               created_at, updated_at
          from documents where id = $1`,
-      [c.req.param("id")],
+      [id],
     );
     return r.rows;
   });
   const doc = rows[0];
   if (!doc) throw new MemweError("not_found", "document not found");
-  return c.json(doc);
+  return c.json(DocumentDetail.parse(doc), 200);
 });
 
-documents.get("/", async (c) => {
+const listRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["documents"],
+  summary: "List documents",
+  request: { query: z.object({ container: z.string().optional() }) },
+  responses: { 200: json(DocumentList, "Up to 50 documents, newest first"), ...errors },
+});
+
+documents.openapi(listRoute, async (c) => {
   const p = c.get("principal");
-  const container = c.req.query("container");
+  const { container } = c.req.valid("query");
   const rows = await withTenant({ orgId: p.orgId }, async (client) => {
     const r = await client.query(
       `select id::text, container, title, status::text, created_at
@@ -103,5 +249,5 @@ documents.get("/", async (c) => {
     );
     return r.rows;
   });
-  return c.json({ documents: rows });
+  return c.json(DocumentList.parse({ documents: rows }), 200);
 });

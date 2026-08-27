@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { pool, tx, close } from "./index.js";
+import { close, pool, tx } from "./index.js";
 
 /**
  * Seed fixtures. Two orgs so every isolation test has a second tenant to
@@ -10,19 +10,66 @@ const ORG_A = "11111111-1111-1111-1111-111111111111";
 const ORG_B = "22222222-2222-2222-2222-222222222222";
 
 const DOCS: Array<{ org: string; container: string; title: string; body: string }> = [
-  { org: ORG_A, container: "user_shaheem", title: "Onboarding notes", body: "Shaheem runs a DOOH advertising business. Prefers terse answers with no preamble." },
-  { org: ORG_A, container: "user_shaheem", title: "Stack decision", body: "We picked Postgres with pgvector over a dedicated vector database because one transaction covers chunks, memories and edges." },
-  { org: ORG_A, container: "user_shaheem", title: "Meeting 2026-08-14", body: "Discussed the memory layer. Bru takes the platform track, Shaheem takes the engine." },
+  {
+    org: ORG_A,
+    container: "user_shaheem",
+    title: "Onboarding notes",
+    body: "Shaheem runs a DOOH advertising business. Prefers terse answers with no preamble.",
+  },
+  {
+    org: ORG_A,
+    container: "user_shaheem",
+    title: "Stack decision",
+    body: "We picked Postgres with pgvector over a dedicated vector database because one transaction covers chunks, memories and edges.",
+  },
+  {
+    org: ORG_A,
+    container: "user_shaheem",
+    title: "Meeting 2026-08-14",
+    body: "Discussed the memory layer. Bru takes the platform track, Shaheem takes the engine.",
+  },
   { org: ORG_A, container: "user_shaheem", title: "Empty-ish doc", body: "ok" },
-  { org: ORG_A, container: "project_memwe", title: "Latency budget", body: "Base recall must stay under 65ms p50. Reranking adds about 90ms and is optional per request." },
-  { org: ORG_A, container: "project_memwe", title: "Cost model", body: "Distillation dominates. Batch reconciliation per unit, never per candidate fact." },
-  { org: ORG_B, container: "user_other", title: "Should never leak", body: "This belongs to org B. If it ever appears in an org A search, the isolation test failed." },
+  {
+    org: ORG_A,
+    container: "project_memwe",
+    title: "Latency budget",
+    body: "Base recall must stay under 65ms p50. Reranking adds about 90ms and is optional per request.",
+  },
+  {
+    org: ORG_A,
+    container: "project_memwe",
+    title: "Cost model",
+    body: "Distillation dominates. Batch reconciliation per unit, never per candidate fact.",
+  },
+  {
+    org: ORG_B,
+    container: "user_other",
+    title: "Should never leak",
+    body: "This belongs to org B. If it ever appears in an org A search, the isolation test failed.",
+  },
 ];
 
 /** Fixed dev key so both machines and the smoke test agree. Never ship this. */
 const DEV_KEY = "mw_dev_shaheem_0000000000000000000000000000";
 
+/**
+ * The near-cap file is generated rather than committed — 900KB of lorem in
+ * git is 900KB in every clone, forever, to test one boundary condition.
+ */
+async function writeLargeFixture(): Promise<void> {
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const { dirname, join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
+  await mkdir(dir, { recursive: true });
+  const para =
+    "Retrieval is four retrievers racing, one fusion, and a token budget. " +
+    "Everything is parallel; the slowest leg sets the latency. ";
+  await writeFile(join(dir, "large.txt"), para.repeat(7000).slice(0, 900_000), "utf8");
+}
+
 async function main(): Promise<void> {
+  await writeLargeFixture();
   await tx(async (c) => {
     await c.query(
       `insert into orgs (id, name, plan) values ($1,'Acme (dev)','pro'), ($2,'Other (dev)','free')

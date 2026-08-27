@@ -1,6 +1,6 @@
-import { tx } from "@memwe/db";
-import { DocumentJobPayload } from "@memwe/contracts";
 import type { Job } from "@memwe/contracts";
+import { DocumentJobPayload } from "@memwe/contracts";
+import { tx } from "@memwe/db";
 import type { StageContext } from "./index.js";
 
 /**

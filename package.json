@@ -17,16 +17,21 @@
     "dev:api": "pnpm --filter @memwe/api dev",
     "typecheck": "tsc -b --pretty",
     "test": "vitest run",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.10",
+    "@memwe/contracts": "workspace:*",
+    "@memwe/db": "workspace:*",
     "@types/node": "^22.10.2",
+    "pg": "^8.13.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
-    "pg": "^8.13.1",
-    "@memwe/db": "workspace:*",
-    "@memwe/contracts": "workspace:*"
+    "zod": "^4.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

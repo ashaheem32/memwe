@@ -14,7 +14,7 @@ export const ContainerTag = z
   .regex(CONTAINER_TAG_RE, "container must match ^[a-zA-Z0-9_:-]{1,100}$");
 
 export const Tenant = z.object({
-  orgId: z.string().uuid(),
+  orgId: z.guid(),
   container: ContainerTag,
 });
 export type Tenant = z.infer<typeof Tenant>;

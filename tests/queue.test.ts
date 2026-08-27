@@ -1,5 +1,5 @@
+import { close, pool } from "@memwe/db";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { pool, close } from "@memwe/db";
 import { PgQueue } from "../apps/worker/src/queue.js";
 
 const q = new PgQueue();
@@ -38,10 +38,16 @@ describe("PgQueue", () => {
 
   it("dedupes on dedupeKey while a job is live", async () => {
     const first = await q.enqueue({
-      type: "document.accept", payload: env, traceId: env.traceId, dedupeKey: "dk-1",
+      type: "document.accept",
+      payload: env,
+      traceId: env.traceId,
+      dedupeKey: "dk-1",
     });
     const second = await q.enqueue({
-      type: "document.accept", payload: env, traceId: env.traceId, dedupeKey: "dk-1",
+      type: "document.accept",
+      payload: env,
+      traceId: env.traceId,
+      dedupeKey: "dk-1",
     });
     expect(first).toBeTruthy();
     expect(second).toBeNull();
@@ -55,7 +61,8 @@ describe("PgQueue", () => {
     expect(await q.claim("w1", 10)).toHaveLength(0);
 
     const { rows } = await pool.query<{ status: string; last_error: string }>(
-      "select status::text, last_error from jobs where id=$1", [id],
+      "select status::text, last_error from jobs where id=$1",
+      [id],
     );
     expect(rows[0]?.status).toBe("pending");
     expect(rows[0]?.last_error).toBe("boom");
@@ -64,7 +71,9 @@ describe("PgQueue", () => {
   it("reaps jobs whose worker stopped heartbeating", async () => {
     const id = await q.enqueue({ type: "document.accept", payload: env, traceId: env.traceId });
     await q.claim("w1", 1);
-    await pool.query("update jobs set heartbeat_at = now() - interval '10 minutes' where id=$1", [id]);
+    await pool.query("update jobs set heartbeat_at = now() - interval '10 minutes' where id=$1", [
+      id,
+    ]);
 
     expect(await q.reap(60_000)).toBe(1);
     expect(await q.claim("w2", 10)).toHaveLength(1);
@@ -72,14 +81,20 @@ describe("PgQueue", () => {
 
   it("dead-letters instead of reviving once attempts are exhausted", async () => {
     const id = await q.enqueue({
-      type: "document.accept", payload: env, traceId: env.traceId, maxAttempts: 1,
+      type: "document.accept",
+      payload: env,
+      traceId: env.traceId,
+      maxAttempts: 1,
     });
     await q.claim("w1", 1);
-    await pool.query("update jobs set heartbeat_at = now() - interval '10 minutes' where id=$1", [id]);
+    await pool.query("update jobs set heartbeat_at = now() - interval '10 minutes' where id=$1", [
+      id,
+    ]);
     await q.reap(60_000);
 
     const { rows } = await pool.query<{ status: string }>(
-      "select status::text from jobs where id=$1", [id],
+      "select status::text from jobs where id=$1",
+      [id],
     );
     expect(rows[0]?.status).toBe("dead");
   });
