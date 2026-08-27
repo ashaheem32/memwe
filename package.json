@@ -1,0 +1,36 @@
+{
+  "name": "memwe",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "up": "docker compose up -d && pnpm wait && pnpm migrate",
+    "down": "docker compose down",
+    "nuke": "docker compose down -v",
+    "wait": "node scripts/wait-for-pg.mjs",
+    "migrate": "pnpm --filter @memwe/db migrate",
+    "seed": "pnpm --filter @memwe/db seed",
+    "dev:worker": "pnpm --filter @memwe/worker dev",
+    "dev:api": "pnpm --filter @memwe/api dev",
+    "typecheck": "tsc -b --pretty",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "pg": "^8.13.1",
+    "@memwe/db": "workspace:*",
+    "@memwe/contracts": "workspace:*"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

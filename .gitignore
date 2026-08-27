@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+coverage/
+.pnpm-store/
+
+# macOS AppleDouble sidecars (this volume is exFAT)
+._*
+.Spotlight-V100/
+.Trashes/
