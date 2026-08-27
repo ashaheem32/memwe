@@ -16,13 +16,21 @@ jobs:
           --health-cmd "pg_isready -U memwe" --health-interval 3s
           --health-timeout 3s --health-retries 20
     env:
+      # owner — migrations and worker (bypasses RLS)
       DATABASE_URL: postgres://memwe:memwe@localhost:5432/memwe
+      # app role — created by migration 003, RLS enforced. The isolation
+      # tests are meaningless without this pointing at the restricted role.
+      APP_DATABASE_URL: postgres://memwe_app:memwe_app@localhost:5432/memwe
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 10 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
+      - uses: actions/checkout@v7
+      # No `version:` here on purpose — `packageManager` in package.json is
+      # the single source of truth. Specifying both is an error, not a
+      # tiebreak (ERR_PNPM_BAD_PM_VERSION).
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm migrate
