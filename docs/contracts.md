@@ -86,6 +86,10 @@ the seed data**. If it isn't demoable it isn't done.
 - **Monday, 20 minutes.** What each of you is doing, and any schema change coming.
 - **Friday, demo.** Working software from the seed data, to each other.
 - **Migrations take two signatures.** Announce Monday, merge after both have read it.
+- **Run `pnpm verify`, not a subset of it.** A migration can break `seed`
+  without touching a line of TypeScript: making `documents_hash_idx` partial
+  in 006 invalidated the seed's `ON CONFLICT` arbiter, while lint, typecheck
+  and test all passed. `migrate` and `seed` are gate steps, not setup.
 - **PRs under 400 lines, reviewed within 4 hours.** If review would block
   you longer, merge behind a flag.
 - **Ties break by domain.** Shaheem decides write-path, Bru decides read-path.
