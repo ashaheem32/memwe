@@ -54,7 +54,7 @@ export function sectionTree(md: string): Section[] {
 }
 
 /** First H1, else first heading of any level. */
-export function titleFrom(md: string, sections: Section[]): string | null {
+export function titleFrom(sections: Section[]): string | null {
   const h1 = sections.find((s) => s.level === 1);
   if (h1) return h1.heading;
   return sections[0]?.heading ?? null;
@@ -64,5 +64,5 @@ export function extractMarkdown(text: string): Pick<NormalizedDoc, "sections"> &
   title: string | null;
 } {
   const sections = sectionTree(text);
-  return { sections, title: titleFrom(text, sections) };
+  return { sections, title: titleFrom(sections) };
 }

@@ -13,14 +13,14 @@ import { SpanMap } from "./spans.js";
  */
 function config() {
   return {
-    maxPages: Number(process.env["PDF_MAX_PAGES"] ?? 500),
-    ocrEnabled: process.env["OCR_ENABLED"] !== "false",
+    maxPages: Number(process.env.PDF_MAX_PAGES ?? 500),
+    ocrEnabled: process.env.OCR_ENABLED !== "false",
     /** A page with fewer real characters than this is treated as an image. */
-    ocrMinChars: Number(process.env["PDF_OCR_MIN_CHARS"] ?? 16),
-    ocrMaxPages: Number(process.env["PDF_OCR_MAX_PAGES"] ?? 20),
-    ocrDpi: Number(process.env["PDF_OCR_DPI"] ?? 200),
+    ocrMinChars: Number(process.env.PDF_OCR_MIN_CHARS ?? 16),
+    ocrMaxPages: Number(process.env.PDF_OCR_MAX_PAGES ?? 20),
+    ocrDpi: Number(process.env.PDF_OCR_DPI ?? 200),
     /** A line this much larger than body text is a heading. */
-    headingRatio: Number(process.env["PDF_HEADING_RATIO"] ?? 1.15),
+    headingRatio: Number(process.env.PDF_HEADING_RATIO ?? 1.15),
   };
 }
 
@@ -126,7 +126,7 @@ function headingLevels(pages: Line[][], ratio: number): Map<number, number> {
 
   const body = sizes[Math.floor(sizes.length / 2)] ?? 0;
   const bigger = [...new Set(sizes.filter((s) => s > body * ratio))].sort((a, b) => b - a);
-  bigger.forEach((size, i) => levels.set(size, Math.min(i + 1, 6)));
+  for (const [i, size] of bigger.entries()) levels.set(size, Math.min(i + 1, 6));
   return levels;
 }
 
