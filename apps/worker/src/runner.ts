@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Job } from "@memwe/contracts";
 import { isRetryable, JOB_PAYLOAD, MemweError } from "@memwe/contracts";
+import { tx } from "@memwe/db";
 import { log } from "./log.js";
 import { queue } from "./queue.js";
 import { STAGES } from "./stages/index.js";
@@ -102,8 +103,28 @@ export class Runner {
         });
       } else {
         await queue.kill(job.id, message);
+        // A dead job on a document must fail the document too. Otherwise it
+        // sits at 'extracting' forever, invisible to anyone looking at the
+        // API and indistinguishable from work still in progress.
+        await this.failDocument(job, message, jlog);
         jlog.error("job dead", { err: message, attempts: job.attempts, exhausted });
       }
+    }
+  }
+
+  private async failDocument(job: Job, error: string, jlog: typeof log): Promise<void> {
+    const payload = job.payload as { documentId?: unknown };
+    if (typeof payload?.documentId !== "string") return;
+    try {
+      await tx(async (c) => {
+        await c.query(
+          `update documents set status = 'failed', stage_error = $2, updated_at = now()
+            where id = $1 and status <> 'done'`,
+          [payload.documentId, error.slice(0, 2000)],
+        );
+      });
+    } catch (err) {
+      jlog.error("could not mark document failed", { err: String(err) });
     }
   }
 

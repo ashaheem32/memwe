@@ -137,6 +137,66 @@ else {
     : fail("uploaded document did not complete");
 }
 
+// ---- extraction -------------------------------------------------------
+const extractCases = [
+  { file: "simple.pdf", ct: "application/pdf", want: /Latency budget/i, label: "PDF text layer" },
+  { file: "structured.md", ct: "text/markdown", want: /Sub-300ms/i, label: "markdown" },
+  {
+    file: "unicode.txt",
+    ct: "text/plain",
+    want: /\u0645\u0631\u062d\u0628\u0627/,
+    label: "unicode text",
+  },
+];
+for (const c of extractCases) {
+  const bytes = await readFile(new URL(`../packages/db/fixtures/${c.file}`, import.meta.url));
+  const pre = await fetch(`${API}/v1/documents/upload`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({ container: "user_shaheem", filename: c.file, contentType: c.ct }),
+  });
+  if (!pre.ok) {
+    fail(`${c.label}: presign ${pre.status}`);
+    continue;
+  }
+  const { id: eid, uploadUrl: eurl } = await pre.json();
+  await fetch(eurl, { method: "PUT", headers: { "content-type": c.ct }, body: bytes });
+  await fetch(`${API}/v1/documents/upload/${eid}/complete`, { method: "POST", headers: H });
+  const st = await poll(eid);
+  if (st !== "done") {
+    fail(`${c.label}: ended at '${st}'`);
+    continue;
+  }
+  const doc = await fetch(`${API}/v1/documents/${eid}`, { headers: H }).then((r) => r.json());
+  doc.token_count > 0
+    ? ok(`${c.label} extracted (${doc.token_count} tokens)`)
+    : fail(`${c.label}: no tokens`);
+}
+
+// A lying extension must fail the document, not the batch, and not retry.
+{
+  const bytes = await readFile(
+    new URL("../packages/db/fixtures/actually-a-png.txt", import.meta.url),
+  );
+  const pre = await fetch(`${API}/v1/documents/upload`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({
+      container: "user_shaheem",
+      filename: "actually-a-png.txt",
+      contentType: "text/plain",
+    }),
+  });
+  const { id: bid, uploadUrl: burl } = await pre.json();
+  await fetch(burl, { method: "PUT", headers: { "content-type": "text/plain" }, body: bytes });
+  await fetch(`${API}/v1/documents/upload/${bid}/complete`, { method: "POST", headers: H });
+  const st = await poll(bid, "failed");
+  const doc = await fetch(`${API}/v1/documents/${bid}`, { headers: H }).then((r) => r.json());
+  st === "failed" && /image\/png/.test(doc.stage_error ?? "")
+    ? ok("lying extension failed the document with a reason")
+    : fail(`lying extension ended '${st}' (${doc.stage_error ?? "no error"})`);
+}
+
 // ---- validation -------------------------------------------------------
 const bad = await fetch(`${API}/v1/documents`, {
   method: "POST",

@@ -10,6 +10,10 @@
   },
   "dependencies": {
     "@memwe/contracts": "workspace:*",
-    "@memwe/db": "workspace:*"
+    "@memwe/db": "workspace:*",
+    "@memwe/storage": "workspace:*",
+    "file-type": "^22.0.2",
+    "mupdf": "^1.28.0",
+    "tesseract.js": "^7.0.0"
   }
 }

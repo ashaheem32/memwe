@@ -6,7 +6,9 @@ cases in CI rather than in production.
 
 | File | What it exercises |
 |---|---|
-| `simple.pdf` | Text-layer PDF. Baseline extraction. |
+| `simple.pdf` | Two-page text-layer PDF with a real xref. Baseline extraction and per-page span locators. |
+| `broken-xref.pdf` | Same document with `startxref` corrupted. Real-world PDFs are broken constantly; the extractor must repair, not reject. |
+| `scanned.pdf` | Image-only PDF, zero-character text layer. The OCR fallback trigger. |
 | `simple.docx` | OOXML zip. Must not be sniffed as `application/zip`. |
 | `structured.md` | Deep heading tree + a fenced code block. Structural chunking must not split the fence. |
 | `unicode.txt` | Emoji, RTL Arabic/Hebrew, Devanagari, combining marks, ZWJ sequences. Chunk boundaries must not split a grapheme cluster. |
@@ -16,10 +18,14 @@ cases in CI rather than in production.
 
 ## Still needed — requires real-world files
 
-- **A scanned, image-only PDF.** The OCR path is a different code path from
-  the text-layer path and this corpus does not currently exercise it. Drop
-  any scanned document in as `scanned.pdf` before Sprint 1's PDF work.
 - **A password-protected PDF**, to confirm it fails cleanly rather than hanging.
+- **A PDF with a partial text layer** — a digital report with one scanned
+  signature page. The per-page OCR decision handles it in principle; nothing
+  proves it yet.
 - **An audio file**, once transcription lands.
+
+`simple.pdf`, `broken-xref.pdf` and `scanned.pdf` are generated, not sourced.
+The generators live in the commit that added them; regenerate rather than
+hand-edit, or the xref offsets stop matching.
 
 Keep everything small. This directory is checked out on every CI run.

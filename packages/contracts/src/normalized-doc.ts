@@ -15,9 +15,18 @@ import { ContainerTag } from "./tenant.js";
 export const SpanMapEntry = z.object({
   /** offset in the emitted markdown */
   md: z.number().int().nonnegative(),
-  /** corresponding offset in the original source */
+  /**
+   * Corresponding offset in the original source. Best effort: for text and
+   * markdown it is an exact byte-stream offset; for paginated formats it is
+   * an offset into the extracted text of that page, because a character
+   * offset into raw PDF bytes means nothing for provenance.
+   */
   src: z.number().int().nonnegative(),
+  /** 1-indexed source page, for formats that have pages. */
+  page: z.number().int().positive().optional(),
 });
+
+export type SpanMapEntry = z.infer<typeof SpanMapEntry>;
 
 export const Section = z.object({
   heading: z.string(),
@@ -25,6 +34,8 @@ export const Section = z.object({
   start: z.number().int().nonnegative(),
   end: z.number().int().nonnegative(),
 });
+
+export type Section = z.infer<typeof Section>;
 
 export const TrustTier = z.enum(["first_party", "internal", "external", "untrusted"]);
 export type TrustTier = z.infer<typeof TrustTier>;

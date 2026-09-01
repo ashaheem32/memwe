@@ -1,4 +1,5 @@
 import { close, installVectorParser } from "@memwe/db";
+import { disposeOcr } from "./extract/ocr.js";
 import { log } from "./log.js";
 import { Runner } from "./runner.js";
 
@@ -7,6 +8,7 @@ const runner = new Runner();
 async function shutdown(signal: string): Promise<void> {
   log.info("signal received", { signal });
   await runner.stop();
+  await disposeOcr();
   await close();
   process.exit(0);
 }
