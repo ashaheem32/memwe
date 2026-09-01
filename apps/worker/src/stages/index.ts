@@ -1,6 +1,7 @@
 import type { Job, JobType } from "@memwe/contracts";
 import type { Logger } from "../log.js";
 import { accept } from "./accept.js";
+import { chunkStage } from "./chunk.js";
 import { extractStage } from "./extract.js";
 
 export type StageContext = { log: Logger };
@@ -14,7 +15,8 @@ export type Stage = (job: Job, ctx: StageContext) => Promise<void>;
 export const STAGES: Partial<Record<JobType, Stage>> = {
   "document.accept": accept,
   "document.extract": extractStage,
-  // Next: document.chunk, document.embed, document.index
+  "document.chunk": chunkStage,
+  // Next: document.embed, document.index
   // Sprint 3: memory.distill, memory.reconcile
   // Sprint 4: session.promote, graph.consolidate
   // Sprint 6: connector.sync

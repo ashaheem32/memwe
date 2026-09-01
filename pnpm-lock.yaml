@@ -77,6 +77,9 @@ importers:
       file-type:
         specifier: ^22.0.2
         version: 22.0.2
+      gpt-tokenizer:
+        specifier: ^4.0.0
+        version: 4.0.0
       mupdf:
         specifier: ^1.28.0
         version: 1.28.0
@@ -862,6 +865,9 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  gpt-tokenizer@4.0.0:
+    resolution: {integrity: sha512-YAWIyzvuVUHEfW7tFfFAxH8qQb+Q3RU9nYOTy7skMNX5qzU6Q8jxTHZLyO56ug1vYvCR7wndzpd3jwD86/mhjQ==}
 
   hono@4.13.5:
     resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
@@ -1814,6 +1820,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  gpt-tokenizer@4.0.0: {}
 
   hono@4.13.5: {}
 

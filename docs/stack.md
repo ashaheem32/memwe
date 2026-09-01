@@ -25,6 +25,7 @@ Read with `docs/contracts.md` (the seam between the two tracks) and
 | PDF text + raster | mupdf (WASM) | 1.28.0 |
 | OCR | tesseract.js (WASM) | 7.0.0 |
 | Content sniffing | file-type | 22.0.2 |
+| Token counting | gpt-tokenizer (o200k) | 4.0.0 |
 | Lint + format | Biome | 2.5.10 |
 | Tests | Vitest | 2.1.9 |
 | Dev execution | tsx | 4.23.12 |
@@ -200,6 +201,30 @@ spend cap is unset would be the wrong default.
 **What it costs:** tesseract downloads ~15MB of language data on first use,
 which is why the real OCR pass is opt-in in tests (`RUN_OCR_TESTS=1`) rather
 than run on every CI job.
+
+### A real tokenizer, not chars/4
+
+Chunk budgets need token counts, and the number that matters belongs to the
+embedding model — which is not chosen yet. So counting sits behind a
+`TokenCounter` interface with o200k as the stand-in.
+
+The heuristic was measured before being rejected:
+
+| | real | chars/4 | error |
+|---|---|---|---|
+| English prose | 18 | 20 | +11% |
+| Arabic | 12 | 12 | 0% |
+| Code | 21 | 13 | **-38%** |
+| Emoji | 18 | 5 | **-72%** |
+
+Being 11% out on a 600-token budget is fine. Being 72% out is how a chunk
+sails past an embedding model's hard limit and the request fails. The
+corpus has Arabic, Devanagari and emoji fixtures precisely because that is
+where a chars-based guess falls apart.
+
+**What it costs:** ~25MB unpacked and a ~70ms load, paid once at worker
+start rather than per chunk. When embeddings land, the provider's own count
+replaces o200k here and the budget re-tunes against it.
 
 ## Deliberate omissions
 

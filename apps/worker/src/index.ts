@@ -1,4 +1,5 @@
 import { close, installVectorParser } from "@memwe/db";
+import { warmTokenizer } from "./chunk/tokens.js";
 import { disposeOcr } from "./extract/ocr.js";
 import { log } from "./log.js";
 import { Runner } from "./runner.js";
@@ -20,4 +21,5 @@ process.on("unhandledRejection", (reason) => {
 });
 
 await installVectorParser();
+await warmTokenizer();
 await runner.start();
