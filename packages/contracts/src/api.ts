@@ -41,6 +41,12 @@ export const DocumentSummary = z
 export const DocumentDetail = DocumentSummary.extend({
   token_count: z.number().int().nullable(),
   stage_error: z.string().nullable(),
+  /** Which pipeline stage failed. Null unless status is `failed`. */
+  failed_stage: z.string().nullable(),
+  /** When the document last moved stage — the answer to "is it stuck?". */
+  status_changed_at: z.union([z.string(), z.date()]).nullable(),
+  /** 0..1 position through the pipeline, so a caller need not know the stages. */
+  progress: z.number().min(0).max(1),
   updated_at: z.union([z.string(), z.date()]),
 }).meta({ id: "DocumentDetail" });
 

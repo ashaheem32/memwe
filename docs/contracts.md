@@ -99,7 +99,28 @@ the seed data**. If it isn't demoable it isn't done.
 | Queue | pgmq | `jobs` table + `FOR UPDATE SKIP LOCKED` | No extension to install, fully inspectable, retries/heartbeat/DLQ are ours to tune. Sits behind the `Queue` interface so swapping later is one file. |
 | Partitions | hash by container | 4 partitions on `chunks` and `memories` | Enough to prove isolation at the storage layer. Raise the modulus before you have real data, not after. |
 | FKs into partitioned tables | not specified | `memory_edges` carries `container` and FKs on `(container, id)` | Keeps referential integrity without an app-level invariant nobody remembers. |
+| Status machine | each stage sets its own | the runner drives it, guarded in one module | See below. |
 | Database roles | one role | `memwe` (owner, bypasses RLS) + `memwe_app` (RLS forced) | See below. |
+
+### Migration 005 — three declared states that were never written
+
+`doc_status` has declared seven states since `001`, but only three were ever
+used: `accept` wrote `extracting`, then a stage wrote `done` or the runner
+wrote `failed`. `chunking`, `embedding` and `indexing` sat in the enum
+unused, so a document being embedded reported `extracting` — indistinguishable
+from being stuck, which is the exact failure the dead-job handling exists to
+avoid.
+
+The cause was that each stage wrote its own status. The runner now owns both
+the status machine and pipeline advancement; stages are pure work units.
+That also removed the identical "enqueue next or mark done" block that three
+stages were repeating.
+
+Transitions go through `advanceStatus()`, which is forward-only and guarded
+in the `WHERE` clause rather than by read-then-write — two workers can hold
+jobs for the same document at once (a reaped job running beside its
+replacement), and a conditional update makes the loser a no-op instead of a
+rollback. `done` and `failed` are terminal; `reprocess()` is the only way out.
 
 ### Migration 003 — the bug the isolation test caught on day one
 

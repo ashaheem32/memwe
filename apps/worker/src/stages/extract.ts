@@ -3,9 +3,7 @@ import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
 import { getObject } from "@memwe/storage";
 import { extract } from "../extract/index.js";
-import { queue } from "../queue.js";
 import type { StageContext } from "./index.js";
-import { nextStage } from "./pipeline.js";
 
 type Row = {
   blob_key: string | null;
@@ -94,24 +92,4 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<void> {
   });
 
   ctx.log.info("extracted", { documentId: p.documentId, ...stats });
-
-  const next = nextStage("document.extract");
-  if (next) {
-    await queue.enqueue({
-      type: next,
-      payload: { ...p },
-      traceId: job.traceId,
-      dedupeKey: `${next}:${p.documentId}`,
-    });
-    return;
-  }
-
-  // Nothing downstream is built yet. Say so rather than silently calling
-  // a half-run pipeline "done".
-  await tx(async (c) => {
-    await c.query(`update documents set status = 'done', updated_at = now() where id = $1`, [
-      p.documentId,
-    ]);
-  });
-  ctx.log.debug("no downstream stage registered, marking done", { documentId: p.documentId });
 }

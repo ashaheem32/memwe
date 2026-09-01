@@ -2,9 +2,7 @@ import type { Job } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
 import { EMBED_DIM, embedAll, provider } from "../embed/index.js";
-import { queue } from "../queue.js";
 import type { StageContext } from "./index.js";
-import { nextStage } from "./pipeline.js";
 
 type ChunkRow = { id: string; text: string; context_header: string | null };
 
@@ -88,23 +86,6 @@ export async function embedStage(job: Job, ctx: StageContext): Promise<void> {
       ms: Date.now() - started,
     });
   }
-
-  const next = nextStage("document.embed");
-  if (next) {
-    await queue.enqueue({
-      type: next,
-      payload: { ...p },
-      traceId: job.traceId,
-      dedupeKey: `${next}:${p.documentId}`,
-    });
-    return;
-  }
-
-  await tx(async (c) => {
-    await c.query(`update documents set status = 'done', updated_at = now() where id = $1`, [
-      p.documentId,
-    ]);
-  });
 }
 
 export { EMBED_DIM };

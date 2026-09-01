@@ -21,22 +21,11 @@ export async function accept(job: Job, ctx: StageContext): Promise<void> {
     const doc = rows[0];
     if (!doc) throw new MemweError("not_found", `document ${p.documentId} vanished`);
 
+    // Status and hand-off both belong to the runner now. Admission is the
+    // only thing this stage decides.
     if (doc.status !== "queued") {
       ctx.log.info("already admitted, skipping", { documentId: doc.id, status: doc.status });
-      return;
     }
-
-    await c.query(`update documents set status='extracting', updated_at=now() where id=$1`, [
-      doc.id,
-    ]);
-  });
-
-  const { queue } = await import("../queue.js");
-  await queue.enqueue({
-    type: "document.extract",
-    payload: { ...p },
-    traceId: job.traceId,
-    dedupeKey: `extract:${p.documentId}`,
   });
 
   ctx.log.info("accepted", { documentId: p.documentId });

@@ -216,7 +216,18 @@ documents.openapi(getRoute, async (c) => {
   const rows = await withTenant({ orgId: p.orgId }, async (client) => {
     const r = await client.query(
       `select id::text, container, title, status::text, token_count, stage_error,
-              created_at, updated_at
+              failed_stage, status_changed_at, created_at, updated_at,
+              -- Position through the pipeline, computed here so a caller
+              -- never has to know the stage names to draw a progress bar.
+              case status
+                when 'queued'     then 0.0
+                when 'extracting' then 0.2
+                when 'chunking'   then 0.4
+                when 'embedding'  then 0.6
+                when 'indexing'   then 0.8
+                when 'done'       then 1.0
+                when 'failed'     then 1.0
+              end::float8 as progress
          from documents where id = $1`,
       [id],
     );

@@ -2,9 +2,7 @@ import type { Job, Section } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
 import { chunkDocument, contextHeader } from "../chunk/index.js";
-import { queue } from "../queue.js";
 import type { StageContext } from "./index.js";
-import { nextStage } from "./pipeline.js";
 
 type Row = {
   markdown: string | null;
@@ -93,22 +91,5 @@ export async function chunkStage(job: Job, ctx: StageContext): Promise<void> {
     minTokens: counts[0],
     maxTokens: counts[counts.length - 1],
     withOverlap: chunks.filter((k) => k.overlapTokens > 0).length,
-  });
-
-  const next = nextStage("document.chunk");
-  if (next) {
-    await queue.enqueue({
-      type: next,
-      payload: { ...p },
-      traceId: job.traceId,
-      dedupeKey: `${next}:${p.documentId}`,
-    });
-    return;
-  }
-
-  await tx(async (c) => {
-    await c.query(`update documents set status = 'done', updated_at = now() where id = $1`, [
-      p.documentId,
-    ]);
   });
 }

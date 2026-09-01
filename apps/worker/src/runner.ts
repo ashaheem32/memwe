@@ -5,6 +5,8 @@ import { tx } from "@memwe/db";
 import { log } from "./log.js";
 import { queue } from "./queue.js";
 import { STAGES } from "./stages/index.js";
+import { nextStage } from "./stages/pipeline.js";
+import { advanceStatus, failDocument, STAGE_STATUS } from "./status.js";
 
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4);
 const POLL_MS = Number(process.env.WORKER_POLL_MS ?? 500);
@@ -84,9 +86,24 @@ export class Runner {
 
       const schema = JOB_PAYLOAD[job.type];
       job.payload = schema.parse(job.payload) as unknown;
+      const documentId = this.documentIdOf(job);
+
+      // The runner owns the status machine, not the stages. Each stage
+      // writing its own status is how three of the seven declared states
+      // stayed unused while documents reported `extracting` for the whole
+      // run. Set at dispatch, so the status is what is actually running.
+      const status = STAGE_STATUS[job.type];
+      if (documentId && status) {
+        await tx((c) => advanceStatus(c, documentId, status));
+      }
 
       await stage(job, { log: jlog });
       await queue.complete(job.id);
+
+      // Advancement is the runner's too, so a stage never has to know what
+      // follows it and three stages stop repeating the same block.
+      if (documentId) await this.advance(job, documentId, jlog);
+
       jlog.info("job done", { ms: Date.now() - started });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -104,25 +121,41 @@ export class Runner {
       } else {
         await queue.kill(job.id, message);
         // A dead job on a document must fail the document too. Otherwise it
-        // sits at 'extracting' forever, invisible to anyone looking at the
-        // API and indistinguishable from work still in progress.
+        // sits mid-pipeline forever, invisible to anyone looking at the API
+        // and indistinguishable from work still in progress.
         await this.failDocument(job, message, jlog);
         jlog.error("job dead", { err: message, attempts: job.attempts, exhausted });
       }
     }
   }
 
-  private async failDocument(job: Job, error: string, jlog: typeof log): Promise<void> {
+  private documentIdOf(job: Job): string | null {
     const payload = job.payload as { documentId?: unknown };
-    if (typeof payload?.documentId !== "string") return;
-    try {
-      await tx(async (c) => {
-        await c.query(
-          `update documents set status = 'failed', stage_error = $2, updated_at = now()
-            where id = $1 and status <> 'done'`,
-          [payload.documentId, error.slice(0, 2000)],
-        );
+    return typeof payload?.documentId === "string" ? payload.documentId : null;
+  }
+
+  private async advance(job: Job, documentId: string, jlog: typeof log): Promise<void> {
+    const next = nextStage(job.type);
+    if (next) {
+      await queue.enqueue({
+        type: next,
+        payload: job.payload as Record<string, unknown>,
+        traceId: job.traceId,
+        dedupeKey: `${next}:${documentId}`,
       });
+      return;
+    }
+    // Nothing further is registered, so the pipeline is complete for this
+    // document as currently built.
+    const moved = await tx((c) => advanceStatus(c, documentId, "done"));
+    if (moved) jlog.debug("pipeline complete", { documentId });
+  }
+
+  private async failDocument(job: Job, error: string, jlog: typeof log): Promise<void> {
+    const documentId = this.documentIdOf(job);
+    if (!documentId) return;
+    try {
+      await tx((c) => failDocument(c, documentId, job.type, error));
     } catch (err) {
       jlog.error("could not mark document failed", { err: String(err) });
     }
