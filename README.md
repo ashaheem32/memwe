@@ -35,6 +35,17 @@ pnpm smoke       # terminal 3 — the Sprint 0 milestone check
 
 `pnpm nuke` tears the stack down including volumes.
 
+## Before you push
+
+```bash
+pnpm verify   # lint -> typecheck -> migrate -> seed -> test
+```
+
+This is exactly what `.github/workflows/ci.yml` runs, in the same order.
+Running a subset of it locally and calling it "the gate" is how a migration
+that broke `pnpm seed` reached `main` — `migrate` and `seed` are steps, not
+setup.
+
 ## The milestone
 
 `POST /v1/documents` writes a row, enqueues a job, a worker claims it and

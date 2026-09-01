@@ -20,7 +20,8 @@
     "smoke": "node scripts/smoke.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "verify": "pnpm lint && pnpm typecheck && pnpm migrate && pnpm seed && pnpm test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",

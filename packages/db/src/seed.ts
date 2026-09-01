@@ -82,7 +82,8 @@ async function main(): Promise<void> {
       await c.query(
         `insert into documents (id, org_id, container, title, markdown, content_hash, mime, status)
          values ($1,$2,$3,$4,$5,$6,'text/markdown','queued')
-         on conflict (org_id, container, content_hash) do nothing`,
+         on conflict (org_id, container, content_hash) where duplicate_of is null
+         do nothing`,
         [randomUUID(), d.org, d.container, d.title, d.body, hash],
       );
     }
