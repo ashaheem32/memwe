@@ -9,6 +9,7 @@ cases in CI rather than in production.
 | `simple.pdf` | Two-page text-layer PDF with a real xref. Baseline extraction and per-page span locators. |
 | `broken-xref.pdf` | Same document with `startxref` corrupted. Real-world PDFs are broken constantly; the extractor must repair, not reject. |
 | `scanned.pdf` | Image-only PDF, zero-character text layer. The OCR fallback trigger. |
+| `report.pdf` | Four pages with a running header, page-number footer, three font sizes, and a word broken across a line break. Exercises running-head removal, heading inference and de-hyphenation together. |
 | `simple.docx` | OOXML zip. Must not be sniffed as `application/zip`. |
 | `structured.md` | Deep heading tree + a fenced code block. Structural chunking must not split the fence. |
 | `unicode.txt` | Emoji, RTL Arabic/Hebrew, Devanagari, combining marks, ZWJ sequences. Chunk boundaries must not split a grapheme cluster. |

@@ -24,9 +24,29 @@ export const SpanMapEntry = z.object({
   src: z.number().int().nonnegative(),
   /** 1-indexed source page, for formats that have pages. */
   page: z.number().int().positive().optional(),
+  /** [x, y, w, h] in source units, when the format has geometry. */
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
 });
 
 export type SpanMapEntry = z.infer<typeof SpanMapEntry>;
+
+/**
+ * Where a range of the emitted markdown came from. This is the shape the
+ * `/why` endpoint and the memory-provenance UI consume — a span map that
+ * cannot be resolved back to one of these is decoration, not provenance.
+ */
+export const SourceLocation = z.object({
+  srcStart: z.number().int().nonnegative(),
+  srcEnd: z.number().int().nonnegative(),
+  page: z.number().int().positive().optional(),
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
+  /**
+   * False when normalization rewrote this range (de-hyphenation, ligature
+   * expansion), so the offsets are the enclosing line rather than exact.
+   */
+  exact: z.boolean().default(true),
+});
+export type SourceLocation = z.infer<typeof SourceLocation>;
 
 export const Section = z.object({
   heading: z.string(),

@@ -1,4 +1,4 @@
-import type { Job } from "@memwe/contracts";
+import type { Acl, Job, TrustTier } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
 import { getObject } from "@memwe/storage";
@@ -15,6 +15,8 @@ type Row = {
   title: string | null;
   container: string;
   org_id: string;
+  acl: Acl;
+  trust: TrustTier;
 };
 
 /**
@@ -29,7 +31,8 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<void> {
 
   const row = await tx(async (c) => {
     const r = await c.query<Row>(
-      `select blob_key, markdown, source_uri, mime, title, container, org_id::text
+      `select blob_key, markdown, source_uri, mime, title, container, org_id::text,
+              acl, trust::text as trust
          from documents where id = $1`,
       [p.documentId],
     );
@@ -51,7 +54,17 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<void> {
   }
 
   const { doc, stats } = await extract(
-    { bytes, declaredMime: row.mime, filename: row.title },
+    {
+      bytes,
+      declaredMime: row.mime,
+      filename: row.title,
+      // Carried through, not invented. The ACL-intersection rule and the
+      // never-inject-untrusted-text rule both read these off the memories
+      // that eventually derive from this document.
+      sourceUri: row.source_uri,
+      acl: row.acl,
+      trust: row.trust,
+    },
     ctx.log,
   );
 

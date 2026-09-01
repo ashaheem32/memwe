@@ -22,6 +22,9 @@ Read with `docs/contracts.md` (the seam between the two tracks) and
 | Validation & spec | Zod 4 + `@hono/zod-openapi` | 4.4.3 / 1.6.1 |
 | Cache | Redis via ioredis | 7-alpine / 6.0.0 |
 | Blobs | S3 API via AWS SDK v3 (MinIO local, R2 prod) | 3.1119.0 |
+| PDF text + raster | mupdf (WASM) | 1.28.0 |
+| OCR | tesseract.js (WASM) | 7.0.0 |
+| Content sniffing | file-type | 22.0.2 |
 | Lint + format | Biome | 2.5.10 |
 | Tests | Vitest | 2.1.9 |
 | Dev execution | tsx | 4.23.12 |
@@ -173,6 +176,30 @@ Uploads are presigned PUTs, so a 50MB file goes browser → storage directly and
 never occupies an API worker for the duration of a transfer.
 
 ---
+
+### mupdf for PDFs, tesseract.js for OCR
+
+**Beat:** pdfjs-dist or unpdf for text, plus a native canvas binding for
+rasterisation; poppler or a system tesseract binary.
+
+mupdf does text extraction *and* page rendering, so the OCR fallback needs
+one dependency rather than a PDF reader plus a canvas. Its structured-text
+output also carries per-line bounding boxes and font sizes, which is what
+makes both the fine-grained span map and heading inference possible — pdfjs
+gives you text items and leaves you to reconstruct lines.
+
+Everything is WASM, so there is no system binary to install in CI or a
+container. That was the constraint that ruled out poppler and a native
+tesseract, both of which are faster.
+
+**tesseract.js specifically** because it needs no model API key. A vision
+model reads messy scans far better and slots in behind `OcrProvider`, but
+introducing a metered dependency into the default ingest path while the
+spend cap is unset would be the wrong default.
+
+**What it costs:** tesseract downloads ~15MB of language data on first use,
+which is why the real OCR pass is opt-in in tests (`RUN_OCR_TESTS=1`) rather
+than run on every CI job.
 
 ## Deliberate omissions
 

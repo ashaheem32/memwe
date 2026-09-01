@@ -1,6 +1,8 @@
+import type { Section } from "@memwe/contracts";
 import { MemweError } from "@memwe/contracts";
 import * as mupdf from "mupdf";
 import type { Logger } from "../log.js";
+import { isBrokenWord, normalizeLine } from "./normalize.js";
 import { ocr } from "./ocr.js";
 import { SpanMap } from "./spans.js";
 
@@ -17,28 +19,54 @@ function config() {
     ocrMinChars: Number(process.env["PDF_OCR_MIN_CHARS"] ?? 16),
     ocrMaxPages: Number(process.env["PDF_OCR_MAX_PAGES"] ?? 20),
     ocrDpi: Number(process.env["PDF_OCR_DPI"] ?? 200),
+    /** A line this much larger than body text is a heading. */
+    headingRatio: Number(process.env["PDF_HEADING_RATIO"] ?? 1.15),
   };
 }
 
 export type PdfResult = {
   markdown: string;
   spanMap: SpanMap;
+  sections: Section[];
   title: string | null;
   pages: number;
   ocrPages: number[];
   /** Pages that needed OCR but did not get it. Never truncate silently. */
   ocrSkipped: number[];
+  runningHeads: string[];
+  headings: number;
   meanOcrConfidence: number | null;
 };
 
-type StructuredText = { blocks?: Array<{ lines?: Array<{ text?: string }> }> };
+type Line = { text: string; size: number; bold: boolean; bbox: [number, number, number, number] };
 
-function pageText(page: mupdf.PDFPage): string {
+type StructuredText = {
+  blocks?: Array<{
+    lines?: Array<{
+      text?: string;
+      bbox?: { x: number; y: number; w: number; h: number };
+      font?: { size?: number; weight?: string };
+    }>;
+  }>;
+};
+
+function pageLines(page: mupdf.PDFPage): Line[] {
   const st = JSON.parse(page.toStructuredText("preserve-whitespace").asJSON()) as StructuredText;
-  return (st.blocks ?? [])
-    .map((b) => (b.lines ?? []).map((l) => l.text ?? "").join("\n"))
-    .filter((s) => s.length > 0)
-    .join("\n\n");
+  const out: Line[] = [];
+  for (const block of st.blocks ?? []) {
+    for (const line of block.lines ?? []) {
+      const text = (line.text ?? "").trim();
+      if (text.length === 0) continue;
+      const b = line.bbox;
+      out.push({
+        text,
+        size: line.font?.size ?? 0,
+        bold: (line.font?.weight ?? "normal") === "bold",
+        bbox: b ? [b.x, b.y, b.w, b.h] : [0, 0, 0, 0],
+      });
+    }
+  }
+  return out;
 }
 
 function renderPng(page: mupdf.PDFPage, dpi: number): Buffer {
@@ -52,13 +80,62 @@ function renderPng(page: mupdf.PDFPage, dpi: number): Buffer {
   return Buffer.from(pix.asPNG());
 }
 
+/** Bare page numbers and "Page 3 of 12" carry nothing into a memory. */
+const PAGE_NUMBER = /^(page\s+)?\d+(\s*\/\s*\d+|\s+of\s+\d+)?$/i;
+
+/**
+ * Running heads repeat on most pages and would otherwise appear in every
+ * chunk, diluting the embedding of each one with the document's title.
+ */
+function findRunningHeads(pages: Line[][]): Set<string> {
+  const found = new Set<string>();
+  if (pages.length < 3) return found;
+
+  const counts = new Map<string, number>();
+  for (const lines of pages) {
+    const edges = [lines[0], lines[1], lines[lines.length - 2], lines[lines.length - 1]];
+    for (const line of edges) {
+      if (!line) continue;
+      const key = line.text.replace(/\d+/g, "#").toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  const threshold = Math.ceil(pages.length * 0.6);
+  for (const [key, n] of counts) if (n >= threshold) found.add(key);
+  return found;
+}
+
+function isRunningHead(line: Line, heads: Set<string>): boolean {
+  if (PAGE_NUMBER.test(line.text)) return true;
+  return heads.has(line.text.replace(/\d+/g, "#").toLowerCase());
+}
+
+/**
+ * PDFs have no headings, only text that is bigger. Ranking the distinct
+ * larger-than-body sizes recovers a usable hierarchy, which is what gives
+ * chunking something structural to split on instead of a token count alone.
+ */
+function headingLevels(pages: Line[][], ratio: number): Map<number, number> {
+  const sizes = pages
+    .flat()
+    .map((l) => l.size)
+    .filter((s) => s > 0)
+    .sort((a, b) => a - b);
+  const levels = new Map<number, number>();
+  if (sizes.length === 0) return levels;
+
+  const body = sizes[Math.floor(sizes.length / 2)] ?? 0;
+  const bigger = [...new Set(sizes.filter((s) => s > body * ratio))].sort((a, b) => b - a);
+  bigger.forEach((size, i) => levels.set(size, Math.min(i + 1, 6)));
+  return levels;
+}
+
 /**
  * Text layer first, OCR only where there isn't one.
  *
  * The decision is per page, not per document, because mixed documents are
- * common — a digital report with a scanned signature page. Deciding once
- * for the whole file either wastes OCR on text pages or misses the scanned
- * ones entirely.
+ * common — a digital report with a scanned signature page. Deciding once for
+ * the whole file either wastes OCR on text pages or misses the scanned ones.
  */
 export async function extractPdf(bytes: Buffer, log: Logger): Promise<PdfResult> {
   const cfg = config();
@@ -71,49 +148,46 @@ export async function extractPdf(bytes: Buffer, log: Logger): Promise<PdfResult>
 
   const total = doc.countPages();
   if (total === 0) throw new MemweError("unsupported_content", "PDF has no pages");
-  const pages = Math.min(total, cfg.maxPages);
-  if (total > pages) log.warn("pdf truncated", { total, kept: pages, limit: cfg.maxPages });
+  const pageCount = Math.min(total, cfg.maxPages);
+  if (total > pageCount) {
+    log.warn("pdf truncated", { total, kept: pageCount, limit: cfg.maxPages });
+  }
 
-  const spanMap = new SpanMap();
-  const parts: string[] = [];
+  // Pass one: get every page's lines, OCR-ing the ones with no text layer.
+  const perPage: Line[][] = [];
   const ocrPages: number[] = [];
   const ocrSkipped: number[] = [];
   const confidences: number[] = [];
-  let md = 0;
 
-  for (let i = 0; i < pages; i++) {
+  for (let i = 0; i < pageCount; i++) {
     const page = doc.loadPage(i) as mupdf.PDFPage;
-    let text = pageText(page).trim();
-    let src = 0;
+    let lines = pageLines(page);
+    const chars = lines.reduce((n, l) => n + l.text.length, 0);
 
-    if (text.length < cfg.ocrMinChars) {
-      if (!cfg.ocrEnabled) {
-        ocrSkipped.push(i + 1);
-      } else if (ocrPages.length >= cfg.ocrMaxPages) {
+    if (chars < cfg.ocrMinChars) {
+      if (!cfg.ocrEnabled || ocrPages.length >= cfg.ocrMaxPages) {
         ocrSkipped.push(i + 1);
       } else {
         const started = Date.now();
         const result = await ocr().recognize(renderPng(page, cfg.ocrDpi));
-        text = result.text.trim();
         confidences.push(result.confidence);
         ocrPages.push(i + 1);
+        // OCR gives no geometry or font, so these lines carry page-level
+        // provenance only — which the resolver reports honestly.
+        lines = result.text
+          .split("\n")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0)
+          .map((text) => ({ text, size: 0, bold: false, bbox: [0, 0, 0, 0] as Line["bbox"] }));
         log.debug("ocr page", {
           page: i + 1,
           ms: Date.now() - started,
           confidence: Math.round(result.confidence),
-          chars: text.length,
+          lines: lines.length,
         });
       }
     }
-
-    if (text.length === 0) continue;
-
-    // Offsets are into this page's extracted text — a character offset into
-    // raw PDF bytes would be meaningless.
-    spanMap.mark(md, src, i + 1);
-    src += text.length;
-    parts.push(text);
-    md += text.length + 2; // the "\n\n" join
+    perPage.push(lines);
   }
 
   if (ocrSkipped.length > 0) {
@@ -123,8 +197,90 @@ export async function extractPdf(bytes: Buffer, log: Logger): Promise<PdfResult>
     });
   }
 
-  const markdown = parts.join("\n\n");
-  if (markdown.trim().length === 0) {
+  // Pass two: strip running heads, promote big text to headings, and build
+  // the markdown while recording where every line came from.
+  //
+  // Normalization happens *in this loop*, not afterwards. Running it as a
+  // separate pass would shift every offset after a de-hyphenated join and
+  // leave the span map pointing at the wrong characters — silently, because
+  // both halves would still look correct on their own.
+  const heads = findRunningHeads(perPage);
+  const levels = headingLevels(perPage, cfg.headingRatio);
+  const spanMap = new SpanMap();
+  const sections: Section[] = [];
+  const parts: string[] = [];
+  let md = 0;
+  let headingCount = 0;
+
+  // Flatten first so de-hyphenation can see the following line even when it
+  // is on the next page.
+  type Item = {
+    text: string;
+    level: number | undefined;
+    page: number;
+    src: number;
+    bbox: Line["bbox"];
+  };
+  const items: Item[] = [];
+  for (let p = 0; p < perPage.length; p++) {
+    let src = 0; // offset within this page's extracted text
+    for (const line of perPage[p] ?? []) {
+      const lineSrc = src;
+      src += line.text.length + 1;
+      if (isRunningHead(line, heads)) continue;
+      items.push({
+        text: normalizeLine(line.text),
+        level: levels.get(line.size),
+        page: p + 1,
+        src: lineSrc,
+        bbox: line.bbox,
+      });
+    }
+  }
+
+  let pendingJoin = false;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item) continue;
+    let text = item.text;
+    if (text.length === 0) continue;
+
+    let joinNext = false;
+    if (!item.level && isBrokenWord(text, items[i + 1]?.text ?? "")) {
+      text = text.slice(0, -1);
+      joinNext = true;
+    }
+
+    if (pendingJoin) {
+      // Continuation of a word broken across lines: no new segment, because
+      // the join means this text no longer has its own source offset.
+      const prev = parts.pop() ?? "";
+      const cont = text.trimStart();
+      parts.push(prev + cont);
+      md += cont.length;
+    } else {
+      const rendered = item.level ? `${"#".repeat(item.level)} ${text}` : text;
+      if (item.level) {
+        sections.push({ heading: text, level: item.level, start: md, end: md });
+        headingCount++;
+      }
+      spanMap.mark(md, item.src, { page: item.page, bbox: item.bbox });
+      parts.push(rendered);
+      md += rendered.length + 1;
+    }
+    pendingJoin = joinNext;
+  }
+
+  // Close each section at the next same-or-higher heading.
+  for (let i = 0; i < sections.length; i++) {
+    const current = sections[i];
+    if (!current) continue;
+    const next = sections.slice(i + 1).find((s) => s.level <= current.level);
+    current.end = next ? next.start : md;
+  }
+
+  const normalized = parts.join("\n");
+  if (normalized.trim().length === 0) {
     throw new MemweError(
       "unsupported_content",
       cfg.ocrEnabled
@@ -139,14 +295,18 @@ export async function extractPdf(bytes: Buffer, log: Logger): Promise<PdfResult>
   } catch {
     title = null;
   }
+  title ??= sections.find((s) => s.level === 1)?.heading ?? null;
 
   return {
-    markdown,
+    markdown: normalized,
     spanMap,
+    sections,
     title,
-    pages,
+    pages: pageCount,
     ocrPages,
     ocrSkipped,
+    runningHeads: [...heads],
+    headings: headingCount,
     meanOcrConfidence:
       confidences.length > 0 ? confidences.reduce((a, b) => a + b, 0) / confidences.length : null,
   };

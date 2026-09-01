@@ -7,6 +7,7 @@ import { sectionTree } from "../apps/worker/src/extract/markdown.js";
 import { disposeOcr } from "../apps/worker/src/extract/ocr.js";
 import { extractPdf } from "../apps/worker/src/extract/pdf.js";
 import { sniff } from "../apps/worker/src/extract/sniff.js";
+import { resolveSpan } from "../apps/worker/src/extract/spans.js";
 import { logger } from "../apps/worker/src/log.js";
 
 const FIXTURES = join(import.meta.dirname, "..", "packages", "db", "fixtures");
@@ -162,6 +163,91 @@ describe("pdf", () => {
       if (prev === undefined) delete process.env.OCR_ENABLED;
       else process.env.OCR_ENABLED = prev;
     }
+  });
+});
+
+describe("pdf structure and normalization", () => {
+  it("removes running headers and page numbers", async () => {
+    // A running head repeated on every page would otherwise land in every
+    // chunk, diluting each embedding with the document's title.
+    const r = await run(await fixture("report.pdf"), "application/pdf", "report.pdf");
+    expect(r.doc.markdown).not.toMatch(/Quarterly Report/);
+    expect(r.doc.markdown).not.toMatch(/^Page \d+$/m);
+    expect(r.stats.runningHeadsRemoved).toBeGreaterThan(0);
+  });
+
+  it("infers a heading hierarchy from font size", async () => {
+    // PDFs have no headings, only text that is bigger. Chunking needs the
+    // structure, so it is recovered rather than given up on.
+    const r = await run(await fixture("report.pdf"), "application/pdf");
+    const h1 = r.doc.sections.filter((s) => s.level === 1).map((s) => s.heading);
+    const h2 = r.doc.sections.filter((s) => s.level === 2).map((s) => s.heading);
+    expect(h1).toEqual(["Retrieval Architecture"]);
+    expect(h2).toEqual(["Overview", "Reranking", "Consolidation", "Conclusion"]);
+    expect(r.doc.markdown).toMatch(/^# Retrieval Architecture$/m);
+  });
+
+  it("joins words the layout broke across lines", async () => {
+    const r = await run(await fixture("report.pdf"), "application/pdf");
+    expect(r.doc.markdown).toContain("recurring");
+    expect(r.doc.markdown).not.toContain("recur-");
+  });
+
+  it("emits a span segment per line, not per page", async () => {
+    const r = await run(await fixture("report.pdf"), "application/pdf");
+    expect(r.doc.spanMap.length).toBeGreaterThan(r.stats.pages as number);
+    expect(r.doc.spanMap.every((e) => e.page !== undefined)).toBe(true);
+    expect(r.doc.spanMap.some((e) => e.bbox !== undefined)).toBe(true);
+  });
+
+  it("resolves a phrase back to the page it was printed on", async () => {
+    // This is what /why consumes. A span map that cannot do this is
+    // decoration, not provenance.
+    const r = await run(await fixture("report.pdf"), "application/pdf");
+    const at = r.doc.markdown.indexOf("Consolidation");
+    const [loc] = resolveSpan(r.doc.spanMap, at, at + "Consolidation".length, {
+      markdownLength: r.doc.markdown.length,
+    });
+    expect(loc).toBeDefined();
+    expect(loc!.page).toBe(3);
+    expect(loc!.bbox).toBeDefined();
+  });
+
+  it("cites every page a range crosses", async () => {
+    const r = await run(await fixture("report.pdf"), "application/pdf");
+    const at = r.doc.markdown.indexOf("Reranking");
+    const locs = resolveSpan(r.doc.spanMap, at - 40, at + 40, {
+      markdownLength: r.doc.markdown.length,
+    });
+    expect([...new Set(locs.map((l) => l.page))]).toEqual([1, 2]);
+  });
+});
+
+describe("NormalizedDoc completeness", () => {
+  it("carries the ACL, trust tier and source URI through extraction", async () => {
+    // Dropping these silently breaks two rules: ACL intersection on
+    // distilled memories, and never treating untrusted text as instruction.
+    const acl = { owners: ["user:1"], readers: ["group:eng"], public: false };
+    const r = await extract(
+      {
+        bytes: await fixture("structured.md"),
+        declaredMime: "text/markdown",
+        filename: "structured.md",
+        sourceUri: "https://example.com/doc",
+        acl,
+        trust: "external",
+      },
+      quiet,
+    );
+    expect(r.doc.acl).toMatchObject(acl);
+    expect(r.doc.trust).toBe("external");
+    expect(r.doc.sourceUri).toBe("https://example.com/doc");
+  });
+
+  it("defaults to first_party when nothing is carried in", async () => {
+    const r = await run(await fixture("structured.md"), "text/markdown");
+    expect(r.doc.trust).toBe("first_party");
+    expect(r.doc.acl.public).toBe(false);
   });
 });
 

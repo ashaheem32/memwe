@@ -1,0 +1,94 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<</Type/Catalog/Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type/Pages/Kids[3 0 R 5 0 R 7 0 R 9 0 R]/Count 4>>
+endobj
+3 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 11 0 R>>>>>>
+endobj
+4 0 obj
+<</Length 492>>
+stream
+BT
+/F1 9 Tf 1 0 0 1 72 750 Tm (Memwe Quarterly Report) Tj
+/F1 20 Tf 1 0 0 1 72 700 Tm (Retrieval Architecture) Tj
+/F1 14 Tf 1 0 0 1 72 662 Tm (Overview) Tj
+/F1 12 Tf 1 0 0 1 72 634 Tm (The recall path is four retrievers racing, one fusion step, and a token) Tj
+/F1 12 Tf 1 0 0 1 72 609 Tm (budget. Everything runs in parallel, so the slowest leg determines the) Tj
+/F1 12 Tf 1 0 0 1 72 584 Tm (observed latency rather than the sum of all of them.) Tj
+/F1 9 Tf 1 0 0 1 72 50 Tm (Page 1) Tj
+ET
+endstream
+endobj
+5 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 6 0 R/Resources<</Font<</F1 11 0 R>>>>>>
+endobj
+6 0 obj
+<</Length 427>>
+stream
+BT
+/F1 9 Tf 1 0 0 1 72 750 Tm (Memwe Quarterly Report) Tj
+/F1 14 Tf 1 0 0 1 72 700 Tm (Reranking) Tj
+/F1 12 Tf 1 0 0 1 72 672 Tm (A cross-encoder rescores the fused candidate set. It is the single) Tj
+/F1 12 Tf 1 0 0 1 72 647 Tm (largest quality improvement per engineering hour, and also the) Tj
+/F1 12 Tf 1 0 0 1 72 622 Tm (largest latency line, so it stays optional per request.) Tj
+/F1 9 Tf 1 0 0 1 72 50 Tm (Page 2) Tj
+ET
+endstream
+endobj
+7 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 8 0 R/Resources<</Font<</F1 11 0 R>>>>>>
+endobj
+8 0 obj
+<</Length 435>>
+stream
+BT
+/F1 9 Tf 1 0 0 1 72 750 Tm (Memwe Quarterly Report) Tj
+/F1 14 Tf 1 0 0 1 72 700 Tm (Consolidation) Tj
+/F1 12 Tf 1 0 0 1 72 672 Tm (A nightly pass clusters near-duplicate memories and promotes recur-) Tj
+/F1 12 Tf 1 0 0 1 72 647 Tm (ring episodes into standing preferences, so the graph gets smaller) Tj
+/F1 12 Tf 1 0 0 1 72 622 Tm (and better rather than monotonically larger over time.) Tj
+/F1 9 Tf 1 0 0 1 72 50 Tm (Page 3) Tj
+ET
+endstream
+endobj
+9 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 10 0 R/Resources<</Font<</F1 11 0 R>>>>>>
+endobj
+10 0 obj
+<</Length 324>>
+stream
+BT
+/F1 9 Tf 1 0 0 1 72 750 Tm (Memwe Quarterly Report) Tj
+/F1 14 Tf 1 0 0 1 72 700 Tm (Conclusion) Tj
+/F1 12 Tf 1 0 0 1 72 672 Tm (Atomicity is the argument for keeping vectors, the graph and the) Tj
+/F1 12 Tf 1 0 0 1 72 647 Tm (queue in one database rather than three services.) Tj
+/F1 9 Tf 1 0 0 1 72 50 Tm (Page 4) Tj
+ET
+endstream
+endobj
+11 0 obj
+<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>
+endobj
+xref
+0 12
+0000000000 65535 f 
+0000000015 00000 n 
+0000000060 00000 n 
+0000000129 00000 n 
+0000000242 00000 n 
+0000000782 00000 n 
+0000000895 00000 n 
+0000001370 00000 n 
+0000001483 00000 n 
+0000001966 00000 n 
+0000002080 00000 n 
+0000002453 00000 n 
+trailer
+<</Size 12/Root 1 0 R>>
+startxref
+2517
+%%EOF
