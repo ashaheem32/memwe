@@ -6,7 +6,14 @@ import { embedStage } from "./embed.js";
 import { extractStage } from "./extract.js";
 
 export type StageContext = { log: Logger };
-export type Stage = (job: Job, ctx: StageContext) => Promise<void>;
+
+/**
+ * `halt` stops the pipeline without failing the document — used when a
+ * stage discovers there is nothing left to do, such as bytes we already
+ * have under another id.
+ */
+export type StageResult = void | { halt: true; reason: string };
+export type Stage = (job: Job, ctx: StageContext) => Promise<StageResult>;
 
 /**
  * The stage registry. Adding a pipeline stage means adding a file and a

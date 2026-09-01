@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import type { Acl, Job, TrustTier } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
 import { getObject } from "@memwe/storage";
 import { extract } from "../extract/index.js";
-import type { StageContext } from "./index.js";
+import type { StageContext, StageResult } from "./index.js";
 
 type Row = {
   blob_key: string | null;
@@ -24,7 +25,7 @@ type Row = {
  * rest of the pipeline only ever sees markdown, a span map and a section
  * tree, which is what keeps adding a connector from touching chunking.
  */
-export async function extractStage(job: Job, ctx: StageContext): Promise<void> {
+export async function extractStage(job: Job, ctx: StageContext): Promise<StageResult> {
   const p = DocumentJobPayload.parse(job.payload);
 
   const row = await tx(async (c) => {
@@ -49,6 +50,48 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<void> {
     throw new MemweError("unsupported_content", "URL fetching is not implemented yet");
   } else {
     throw new MemweError("unsupported_content", "document has no content, blob or URL");
+  }
+
+  // The real content hash, computed where the bytes actually are.
+  //
+  // /upload cannot know it: it hands out a presigned URL before any bytes
+  // exist, so it stamps a placeholder derived from the blob key. That
+  // placeholder is unique per document by construction, which meant the
+  // same file uploaded twice was extracted, chunked and embedded twice.
+  if (row.blob_key) {
+    const realHash = createHash("sha256").update(bytes).digest();
+    const duplicate = await tx(async (c) => {
+      const r = await c.query<{ id: string }>(
+        `select id::text from documents
+          where org_id = $1 and container = $2 and content_hash = $3
+            and duplicate_of is null and id <> $4`,
+        [row.org_id, row.container, realHash, p.documentId],
+      );
+      return r.rows[0]?.id ?? null;
+    });
+
+    if (duplicate) {
+      // Keep the row rather than deleting it — the caller holds this id and
+      // deserves an answer, not a 404. Point it at the original and stop.
+      await tx(async (c) => {
+        await c.query(
+          `update documents
+              set duplicate_of = $2, status = 'done',
+                  status_changed_at = now(), updated_at = now()
+            where id = $1`,
+          [p.documentId, duplicate],
+        );
+      });
+      ctx.log.info("duplicate upload", { documentId: p.documentId, duplicateOf: duplicate });
+      return { halt: true, reason: `identical bytes already stored as ${duplicate}` };
+    }
+
+    await tx(async (c) => {
+      await c.query(`update documents set content_hash = $2 where id = $1`, [
+        p.documentId,
+        realHash,
+      ]);
+    });
   }
 
   const { doc, stats } = await extract(

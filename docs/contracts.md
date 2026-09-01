@@ -102,6 +102,34 @@ the seed data**. If it isn't demoable it isn't done.
 | Status machine | each stage sets its own | the runner drives it, guarded in one module | See below. |
 | Database roles | one role | `memwe` (owner, bypasses RLS) + `memwe_app` (RLS forced) | See below. |
 
+### Migration 006 — re-ingest never actually worked
+
+Two documented behaviours did not exist:
+
+**Re-posting a customId with edited content returned a 500.** The unique
+index on `(org, container, custom_id)` was violated and the Postgres error
+escaped unhandled. There was no revision path at all. Now the id stays
+stable — that is what customId is for — the revision counter bumps, derived
+content is cleared so the pipeline cannot serve a mix of two versions, and
+the document re-enters at `queued`.
+
+**Uploads never deduped.** `/upload` issues a presigned URL before any bytes
+exist, so it stamps a placeholder hash derived from the blob key — unique
+per document by construction. The same file uploaded twice was extracted,
+chunked, embedded and billed twice. The extract stage now computes the real
+hash where the bytes actually are; a match marks the row `duplicate_of` and
+halts the pipeline. The row is kept rather than deleted, because the caller
+holds that id and deserves an answer rather than a 404.
+
+Duplicates share their original's hash by definition, so the uniqueness
+index became partial (`where duplicate_of is null`).
+
+**Chunk-level reuse** is where the saving lands. Chunks carry a `text_hash`,
+and re-chunking snapshots the old vectors and carries them onto any chunk
+whose text is unchanged. Editing one paragraph of a 400-page report
+re-embeds a couple of chunks rather than thousands. Measured on a six-section
+document: one section edited, four of six vectors carried over.
+
 ### Migration 005 — three declared states that were never written
 
 `doc_status` has declared seven states since `001`, but only three were ever

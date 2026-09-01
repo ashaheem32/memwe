@@ -25,6 +25,13 @@ export const IngestResponse = z
     status: DocStatus,
     /** True when content-hash dedupe matched — nothing was re-processed or re-billed. */
     deduped: z.boolean(),
+    /**
+     * Bumped when a customId was re-ingested with different content. The id
+     * is stable across revisions; that is what customId is for.
+     */
+    revision: z.number().int().positive().default(1),
+    /** True when this call replaced the stored content and restarted the pipeline. */
+    revised: z.boolean().default(false),
   })
   .meta({ id: "IngestResponse" });
 
@@ -43,6 +50,14 @@ export const DocumentDetail = DocumentSummary.extend({
   stage_error: z.string().nullable(),
   /** Which pipeline stage failed. Null unless status is `failed`. */
   failed_stage: z.string().nullable(),
+  /**
+   * Set when these bytes were already stored under another id. The document
+   * is kept rather than rejected — the caller holds this id — but nothing
+   * was re-processed; follow the pointer for the content.
+   */
+  duplicate_of: z.guid().nullable(),
+  /** Bumped when a customId was re-ingested with different content. */
+  revision: z.number().int().positive(),
   /** When the document last moved stage — the answer to "is it stuck?". */
   status_changed_at: z.union([z.string(), z.date()]).nullable(),
   /** 0..1 position through the pipeline, so a caller need not know the stages. */

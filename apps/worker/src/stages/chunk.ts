@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Job, Section } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
 import { tx } from "@memwe/db";
@@ -47,46 +48,60 @@ export async function chunkStage(job: Job, ctx: StageContext): Promise<void> {
     throw new MemweError("unsupported_content", "chunking produced nothing");
   }
 
-  await tx(async (c) => {
-    // Re-chunking must replace, not append. A document revised in place
-    // would otherwise accumulate every generation of its chunks and return
-    // stale text from search forever.
-    await c.query(`delete from chunks where document_id = $1 and container = $2`, [
-      p.documentId,
-      row.container,
-    ]);
+  const rows = chunks.map((k) => ({
+    ord: k.ord,
+    text: k.text,
+    context_header: contextHeader(doc as never, k),
+    span_start: k.spanStart,
+    span_end: k.spanEnd,
+    token_count: k.tokenCount,
+    text_hash: createHash("sha256").update(k.text).digest("hex"),
+  }));
 
-    // One statement, not one per chunk: a 400-page PDF is thousands of
-    // round trips otherwise.
-    await c.query(
-      `insert into chunks (document_id, org_id, container, ord, text, context_header,
-                           span_start, span_end, token_count)
-       select $1, $2, $3,
+  // Re-chunking replaces rather than appends — a document revised in place
+  // would otherwise accumulate every generation of its chunks and serve
+  // stale text from search forever.
+  //
+  // But an unchanged chunk keeps its vector. Editing one paragraph of a
+  // 400-page report should re-embed a couple of chunks, not thousands, and
+  // embedding is the expensive half of ingest.
+  //
+  // One statement: `old` is materialised from the pre-delete snapshot, and
+  // a data-modifying CTE always runs to completion whether or not the
+  // primary query reads it — so the vectors never travel through Node.
+  const reused = await tx(async (c) => {
+    const r = await c.query<{ reused: boolean }>(
+      `with old as (
+         select distinct on (text_hash) text_hash, embedding, embed_model, embed_dim, embedded_at
+           from chunks
+          where document_id = $1 and container = $2
+            and embedding is not null and text_hash is not null
+       ),
+       del as (
+         delete from chunks where document_id = $1 and container = $2
+       )
+       insert into chunks (document_id, org_id, container, ord, text, context_header,
+                           span_start, span_end, token_count, text_hash,
+                           embedding, embed_model, embed_dim, embedded_at)
+       select $1, $3, $2,
               (v->>'ord')::int, v->>'text', v->>'context_header',
-              (v->>'span_start')::int, (v->>'span_end')::int, (v->>'token_count')::int
-         from jsonb_array_elements($4::jsonb) as v`,
-      [
-        p.documentId,
-        row.org_id,
-        row.container,
-        JSON.stringify(
-          chunks.map((k) => ({
-            ord: k.ord,
-            text: k.text,
-            context_header: contextHeader(doc as never, k),
-            span_start: k.spanStart,
-            span_end: k.spanEnd,
-            token_count: k.tokenCount,
-          })),
-        ),
-      ],
+              (v->>'span_start')::int, (v->>'span_end')::int, (v->>'token_count')::int,
+              decode(v->>'text_hash', 'hex'),
+              o.embedding, o.embed_model, o.embed_dim,
+              o.embedded_at
+         from jsonb_array_elements($4::jsonb) as v
+         left join old o on o.text_hash = decode(v->>'text_hash', 'hex')
+       returning (embedding is not null) as reused`,
+      [p.documentId, row.container, row.org_id, JSON.stringify(rows)],
     );
+    return r.rows.filter((x) => x.reused).length;
   });
 
   const counts = chunks.map((k) => k.tokenCount).sort((a, b) => a - b);
   ctx.log.info("chunked", {
     documentId: p.documentId,
     chunks: chunks.length,
+    reusedEmbeddings: reused,
     medianTokens: counts[Math.floor(counts.length / 2)],
     minTokens: counts[0],
     maxTokens: counts[counts.length - 1],

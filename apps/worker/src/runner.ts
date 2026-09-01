@@ -97,12 +97,16 @@ export class Runner {
         await tx((c) => advanceStatus(c, documentId, status));
       }
 
-      await stage(job, { log: jlog });
+      const result = await stage(job, { log: jlog });
       await queue.complete(job.id);
 
       // Advancement is the runner's too, so a stage never has to know what
       // follows it and three stages stop repeating the same block.
-      if (documentId) await this.advance(job, documentId, jlog);
+      if (result && "halt" in result) {
+        jlog.info("pipeline halted", { reason: result.reason });
+      } else if (documentId) {
+        await this.advance(job, documentId, jlog);
+      }
 
       jlog.info("job done", { ms: Date.now() - started });
     } catch (err) {

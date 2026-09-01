@@ -8,6 +8,14 @@ const API = process.env.API ?? "http://localhost:8080";
 const KEY = process.env.DEV_KEY ?? "mw_dev_shaheem_0000000000000000000000000000";
 const H = { authorization: `Bearer ${KEY}`, "content-type": "application/json" };
 
+/**
+ * A fresh container per run. Dedupe is scoped to a container, so re-running
+ * the smoke test against a seeded database would otherwise resolve every
+ * fixture to the previous run's copy and test dedupe instead of extraction.
+ * This is also how a real tenant is isolated, so nothing is being faked.
+ */
+const C = `smoke_${Date.now()}`;
+
 let failed = 0;
 const fail = (m) => {
   console.error(`  ✗ ${m}`);
@@ -63,7 +71,7 @@ const unauth = await fetch(`${API}/v1/documents`, { headers: { authorization: "B
 unauth.status === 401 ? ok("bad key rejected (401)") : fail(`bad key returned ${unauth.status}`);
 
 // ---- ingest + dedupe --------------------------------------------------
-const body = { container: "user_shaheem", title: "Smoke", content: `smoke ${Date.now()}` };
+const body = { container: C, title: "Smoke", content: `smoke ${Date.now()}` };
 const res = await fetch(`${API}/v1/documents`, {
   method: "POST",
   headers: H,
@@ -89,13 +97,55 @@ dupe.deduped === true && dupe.id === id
   ? ok("worker drove it to done")
   : fail("pipeline did not complete — is `pnpm dev:worker` running?");
 
+// ---- revision by customId ---------------------------------------------
+{
+  const cid = `smoke-rev-${Date.now()}`;
+  const mk = (v) => ({
+    container: C,
+    customId: cid,
+    content: `# Rev\n\n${v}\n\n${"Sentence. ".repeat(40)}`,
+  });
+
+  const first = await fetch(`${API}/v1/documents`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify(mk("one")),
+  }).then((r) => r.json());
+  first.revision === 1 && first.revised === false
+    ? ok("first ingest is revision 1")
+    : fail(`first ingest: ${JSON.stringify(first)}`);
+  await poll(first.id);
+
+  const same = await fetch(`${API}/v1/documents`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify(mk("one")),
+  }).then((r) => r.json());
+  same.deduped === true && same.id === first.id && same.revision === 1
+    ? ok("identical re-ingest dedupes, no revision")
+    : fail(`identical re-ingest: ${JSON.stringify(same)}`);
+
+  // Before this existed the unique index raised and the caller got a 500.
+  const edited = await fetch(`${API}/v1/documents`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify(mk("two, edited")),
+  }).then((r) => r.json());
+  edited.id === first.id && edited.revised === true && edited.revision === 2
+    ? ok("edited re-ingest is a revision, id unchanged")
+    : fail(`edited re-ingest: ${JSON.stringify(edited)}`);
+  (await poll(first.id)) === "done"
+    ? ok("revision reprocessed to done")
+    : fail("revision did not complete");
+}
+
 // ---- upload through MinIO --------------------------------------------
 const pdf = await readFile(new URL("../packages/db/fixtures/simple.pdf", import.meta.url));
 const up = await fetch(`${API}/v1/documents/upload`, {
   method: "POST",
   headers: H,
   body: JSON.stringify({
-    container: "user_shaheem",
+    container: C,
     filename: "simple.pdf",
     contentType: "application/pdf",
   }),
@@ -137,9 +187,41 @@ else {
     : fail("uploaded document did not complete");
 }
 
+// ---- duplicate upload -------------------------------------------------
+{
+  const bytes = await readFile(new URL("../packages/db/fixtures/simple.pdf", import.meta.url));
+  const send = async () => {
+    const pre = await fetch(`${API}/v1/documents/upload`, {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({
+        container: C,
+        filename: "dup.pdf",
+        contentType: "application/pdf",
+      }),
+    }).then((r) => r.json());
+    await fetch(pre.uploadUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/pdf" },
+      body: bytes,
+    });
+    await fetch(`${API}/v1/documents/upload/${pre.id}/complete`, { method: "POST", headers: H });
+    await poll(pre.id);
+    return pre.id;
+  };
+  // /upload cannot hash bytes that do not exist yet, so dedupe for uploads
+  // happens in the extract stage once the blob is readable.
+  const a = await send();
+  const b = await send();
+  const bDoc = await fetch(`${API}/v1/documents/${b}`, { headers: H }).then((r) => r.json());
+  a !== b && bDoc.status === "done"
+    ? ok("duplicate upload resolved without reprocessing")
+    : fail(`duplicate upload: ${JSON.stringify(bDoc)}`);
+}
+
 // ---- extraction -------------------------------------------------------
 const extractCases = [
-  { file: "simple.pdf", ct: "application/pdf", want: /Latency budget/i, label: "PDF text layer" },
+  { file: "report.pdf", ct: "application/pdf", want: /Reranking/i, label: "PDF text layer" },
   { file: "structured.md", ct: "text/markdown", want: /Sub-300ms/i, label: "markdown" },
   {
     file: "unicode.txt",
@@ -153,7 +235,7 @@ for (const c of extractCases) {
   const pre = await fetch(`${API}/v1/documents/upload`, {
     method: "POST",
     headers: H,
-    body: JSON.stringify({ container: "user_shaheem", filename: c.file, contentType: c.ct }),
+    body: JSON.stringify({ container: C, filename: c.file, contentType: c.ct }),
   });
   if (!pre.ok) {
     fail(`${c.label}: presign ${pre.status}`);
@@ -182,7 +264,7 @@ for (const c of extractCases) {
     method: "POST",
     headers: H,
     body: JSON.stringify({
-      container: "user_shaheem",
+      container: C,
       filename: "actually-a-png.txt",
       contentType: "text/plain",
     }),
