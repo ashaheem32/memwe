@@ -26,6 +26,7 @@ Read with `docs/contracts.md` (the seam between the two tracks) and
 | OCR | tesseract.js (WASM) | 7.0.0 |
 | Content sniffing | file-type | 22.0.2 |
 | Token counting | gpt-tokenizer (o200k) | 4.0.0 |
+| Embeddings | provider interface; hash stand-in / Voyage / OpenAI-compatible | — |
 | Lint + format | Biome | 2.5.10 |
 | Tests | Vitest | 2.1.9 |
 | Dev execution | tsx | 4.23.12 |
@@ -225,6 +226,35 @@ where a chars-based guess falls apart.
 **What it costs:** ~25MB unpacked and a ~70ms load, paid once at worker
 start rather than per chunk. When embeddings land, the provider's own count
 replaces o200k here and the budget re-tunes against it.
+
+### Embeddings behind an interface, with a free default
+
+**Beat:** picking one hosted provider and wiring it in directly.
+
+Three implementations sit behind `EmbeddingProvider`: a Voyage client, a
+generic OpenAI-shaped client (which also covers Together, TEI and vLLM, so
+the in-VPC deployment is a URL change), and a deterministic hash stand-in.
+
+**A metered provider is selected only when its key is present.** No ingest
+job may start spending money because a default said so — the same rule that
+kept OCR local. The hash stand-in makes the pipeline complete and testable
+with no key and no model download, which matters in CI permanently and
+matters now while the spend cap is unset.
+
+It is not semantic — "cat" and "kitten" land nowhere near each other — so it
+stamps `hash-v1` on every row it writes, is visible in one query, and
+refuses to run under `NODE_ENV=production` unless `EMBED_ALLOW_HASH=true`.
+A corpus embedded with it retrieves nothing useful while nothing about the
+pipeline looks broken, which is exactly the failure worth guarding.
+
+**1024 dimensions** because voyage-3-large, gemini-embedding-001 and bge-m3
+all produce it, so the column does not move when the provider does. A
+provider returning any other size is a hard error, never a silent
+truncation — a wrong-dimension vector written once is undetectable later.
+
+Batching is token-aware, not row-aware: 128 chunks of 600 tokens is 77k, and
+a provider capping a request at 120k rejects a batch that merely counted
+rows.
 
 ## Deliberate omissions
 
