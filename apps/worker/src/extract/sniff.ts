@@ -6,7 +6,7 @@ import { fileTypeFromBuffer } from "file-type";
  * that a lying extension does not get through.
  */
 export type Detected = {
-  kind: "text" | "markdown" | "pdf" | "unsupported";
+  kind: "text" | "markdown" | "html" | "pdf" | "unsupported";
   mime: string;
   /** Set when the declared type and the real bytes disagree. */
   declaredMismatch?: string;
@@ -19,6 +19,19 @@ const TEXTUAL = new Set([
   "application/json",
   "text/csv",
 ]);
+
+const HTML_MIMES = new Set(["text/html", "application/xhtml+xml"]);
+
+/** An HTML document announces itself early; a stray tag in prose does not. */
+function looksLikeHtml(text: string): boolean {
+  const head = text
+    .slice(0, 1024)
+    .replace(/^\uFEFF/, "")
+    .trimStart();
+  return /^(?:<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]|<!--[\s\S]{0,200}?<html[\s>])/i.test(
+    head,
+  );
+}
 
 /** Heuristic: does this look like markdown rather than prose? */
 function looksLikeMarkdown(text: string, filename: string | null): boolean {
@@ -73,11 +86,17 @@ export async function sniff(
     };
   }
 
-  if (isBinary(bytes)) {
+  const utf16Bom =
+    bytes.length >= 2 &&
+    ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
+  if (!utf16Bom && isBinary(bytes)) {
     return { kind: "unsupported", mime: declaredMime ?? "application/octet-stream" };
   }
 
   const preview = bytes.subarray(0, 8192).toString("utf8");
+  if ((declaredMime && HTML_MIMES.has(declaredMime)) || looksLikeHtml(preview)) {
+    return { kind: "html", mime: "text/html" };
+  }
   const markdown =
     looksLikeMarkdown(preview, filename) ||
     (declaredMime !== null && /markdown/.test(declaredMime));

@@ -123,9 +123,13 @@ describe("batch planning", () => {
     expect(flat).toHaveLength(37);
   });
 
-  it("keeps a single oversized input in its own batch rather than dropping it", () => {
-    const batches = planBatches(inputs(3), { maxBatchSize: 10, maxBatchTokens: 1 });
-    expect(batches.flat()).toHaveLength(3);
+  it("rejects a single oversized input instead of sending an invalid batch", () => {
+    expect(() =>
+      planBatches([{ text: "word ".repeat(1000), kind: "document" }], {
+        maxBatchSize: 10,
+        maxBatchTokens: 10,
+      }),
+    ).toThrow(/budget/);
   });
 
   it("returns nothing for nothing", () => {

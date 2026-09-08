@@ -14,6 +14,7 @@ export function decode(bytes: Buffer): Decoded {
   }
   if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
     const swapped = Buffer.from(bytes.subarray(2));
+    if (swapped.length % 2) throw new Error("UTF-16 input contains an incomplete code unit");
     swapped.swap16();
     return { text: swapped.toString("utf16le"), encoding: "utf-16be", bomStripped: true };
   }

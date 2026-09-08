@@ -2,6 +2,7 @@ import type { Acl, TrustTier } from "@memwe/contracts";
 import { MemweError, NormalizedDoc } from "@memwe/contracts";
 import type { Logger } from "../log.js";
 import { decode } from "./decode.js";
+import { extractHtml } from "./html.js";
 import { extractMarkdown } from "./markdown.js";
 import { normalizeText } from "./normalize.js";
 import { extractPdf } from "./pdf.js";
@@ -11,6 +12,8 @@ import { SpanMap } from "./spans.js";
 export type ExtractInput = {
   bytes: Buffer;
   declaredMime: string | null;
+  /** Transport charset for HTML, when the server declared one. */
+  charset?: string | null;
   filename: string | null;
   /**
    * Everything the document row already knows. Extraction does not invent
@@ -63,6 +66,37 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
     ...(input.trust ? { trust: input.trust } : {}),
   };
 
+  if (detected.kind === "html") {
+    const r = extractHtml(
+      { bytes: input.bytes, url: input.sourceUri ?? null, charset: input.charset ?? null },
+      log,
+    );
+    const doc = NormalizedDoc.parse({
+      ...carried,
+      // The page's own published time is the best "when is this about"
+      // available, unless the caller already said.
+      occurredAt: carried.occurredAt ?? r.publishedAt,
+      title: r.title ?? input.filename ?? null,
+      markdown: r.markdown,
+      spanMap: r.spanMap.toJSON(),
+      sections: r.sections,
+      mime: "text/html",
+    });
+    return {
+      doc,
+      stats: {
+        format: "html",
+        contentTitle: r.title,
+        ...r.stats,
+        publishedAt: r.publishedAt,
+        sections: r.sections.length,
+        spanSegments: r.spanMap.toJSON().length,
+        spanMapTruncatedAt: r.spanMap.truncated,
+        chars: r.markdown.length,
+      },
+    };
+  }
+
   if (detected.kind === "pdf") {
     const r = await extractPdf(input.bytes, log);
     const doc = NormalizedDoc.parse({
@@ -77,6 +111,9 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
       doc,
       stats: {
         format: "pdf",
+        contentTitle: r.title,
+        totalPages: r.totalPages,
+        partial: r.totalPages > r.pages || r.ocrSkipped.length > 0,
         pages: r.pages,
         headings: r.headings,
         ocrPages: r.ocrPages.length,
@@ -94,7 +131,10 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
   const map = new SpanMap();
   // Markdown is authored, so its line breaks are meaningful and a trailing
   // hyphen is a real one. Only PDFs get de-hyphenated.
-  const markdown = normalizeText(text, map, bomStripped ? 3 : 0, { dehyphenate: false });
+  const markdown = normalizeText(text, map, bomStripped ? 1 : 0, {
+    dehyphenate: false,
+    authoredMarkdown: detected.kind === "markdown",
+  });
 
   if (markdown.trim().length === 0) {
     throw new MemweError("unsupported_content", "document is empty after decoding");
@@ -118,6 +158,7 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
     doc,
     stats: {
       format: detected.kind,
+      contentTitle: title,
       encoding,
       bomStripped,
       sections: sections.length,

@@ -3,7 +3,12 @@ import { tokens } from "../chunk/tokens.js";
 import type { Logger } from "../log.js";
 import { HashEmbedding } from "./hash.js";
 import { openAICompatible, voyage } from "./http.js";
-import { EMBED_DIM, type EmbeddingProvider, type EmbedInput } from "./provider.js";
+import {
+  assertDimensions,
+  EMBED_DIM,
+  type EmbeddingProvider,
+  type EmbedInput,
+} from "./provider.js";
 
 export type { EmbeddingProvider } from "./provider.js";
 export { EMBED_DIM } from "./provider.js";
@@ -23,6 +28,8 @@ export function provider(log?: Logger): EmbeddingProvider {
   if (cached) return cached;
 
   const want = process.env["EMBED_PROVIDER"] ?? "auto";
+  if (!["auto", "hash", "openai", "voyage"].includes(want))
+    throw new MemweError("invalid_request", `unknown embedding provider ${want}`);
   const voyageKey = process.env["VOYAGE_API_KEY"];
   const openaiKey = process.env["OPENAI_API_KEY"] ?? process.env["EMBED_API_KEY"];
   const openaiUrl = process.env["EMBED_URL"] ?? "https://api.openai.com/v1/embeddings";
@@ -77,14 +84,29 @@ export function resetProvider(): void {
  */
 export function planBatches(
   inputs: EmbedInput[],
-  p: Pick<EmbeddingProvider, "maxBatchSize" | "maxBatchTokens">,
+  p: Pick<EmbeddingProvider, "maxBatchSize" | "maxBatchTokens" | "maxInputTokens">,
 ): EmbedInput[][] {
+  if (![p.maxBatchSize, p.maxBatchTokens].every((n) => Number.isInteger(n) && n > 0))
+    throw new MemweError("invalid_request", "invalid embedding batch limits");
   const batches: EmbedInput[][] = [];
   let current: EmbedInput[] = [];
   let currentTokens = 0;
 
   for (const input of inputs) {
-    const n = tokens.count(input.text);
+    const n =
+      p.maxInputTokens === undefined
+        ? tokens.count(input.text)
+        : Buffer.byteLength(input.text, "utf8") + 64;
+    if (
+      n > p.maxBatchTokens ||
+      (p.maxInputTokens !== undefined &&
+        Buffer.byteLength(input.text, "utf8") + 64 > p.maxInputTokens)
+    ) {
+      throw new MemweError(
+        "invalid_request",
+        "embedding input exceeds provider budget (including context header)",
+      );
+    }
     const full = current.length >= p.maxBatchSize;
     const wouldOverflow = current.length > 0 && currentTokens + n > p.maxBatchTokens;
     if (full || wouldOverflow) {
@@ -105,7 +127,10 @@ export function planBatches(
  * re-importing the module.
  */
 function maxAttempts(): number {
-  return Number(process.env["EMBED_MAX_ATTEMPTS"] ?? 4);
+  const n = Number(process.env["EMBED_MAX_ATTEMPTS"] ?? 4);
+  if (!Number.isInteger(n) || n <= 0)
+    throw new MemweError("invalid_request", "invalid EMBED_MAX_ATTEMPTS");
+  return n;
 }
 
 /**
@@ -122,7 +147,11 @@ export async function embedBatch(
   const limit = maxAttempts();
   for (let attempt = 1; attempt <= limit; attempt++) {
     try {
-      return await p.embed(batch);
+      const vectors = await p.embed(batch);
+      if (vectors.length !== batch.length)
+        throw new MemweError("upstream_failed", "embedding count mismatch");
+      assertDimensions(vectors, p.dimensions, p.id);
+      return vectors;
     } catch (err) {
       lastError = err;
       const retryable = err instanceof MemweError ? err.retryable : true;

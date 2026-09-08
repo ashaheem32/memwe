@@ -17,7 +17,7 @@ export function sectionTree(md: string): Section[] {
   const sections: Section[] = [];
   const open: Section[] = [];
   let offset = 0;
-  let fence: string | null = null;
+  let fence: { char: string; length: number } | null = null;
 
   for (const line of lines) {
     const lineStart = offset;
@@ -25,8 +25,13 @@ export function sectionTree(md: string): Section[] {
 
     const f = FENCE.exec(line);
     if (f?.[1]) {
-      if (fence === null) fence = f[1][0] ?? "`";
-      else if (line.trimStart().startsWith(fence)) fence = null;
+      if (fence === null) fence = { char: f[1][0] ?? "`", length: f[1].length };
+      else if (
+        f[1][0] === fence.char &&
+        f[1].length >= fence.length &&
+        !line.trimStart().slice(f[1].length).trim()
+      )
+        fence = null;
       continue;
     }
     if (fence !== null) continue;

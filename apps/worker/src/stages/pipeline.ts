@@ -10,6 +10,7 @@ export const PIPELINE: readonly JobType[] = [
   "document.accept",
   "document.extract",
   "document.chunk",
+  "document.contextualize",
   "document.embed",
   "document.index",
 ] as const;

@@ -25,7 +25,8 @@ const QUOTE = /^\s{0,3}>/;
 export function toBlocks(markdown: string): Block[] {
   const lines = markdown.split("\n");
   const blocks: Block[] = [];
-  const path: string[] = [];
+  const headings: Array<{ level: number; heading: string }> = [];
+  let path: string[] = [];
 
   let offset = 0;
   let i = 0;
@@ -53,7 +54,8 @@ export function toBlocks(markdown: string): Block[] {
       const marker = fence[1];
       const from = i;
       i++;
-      while (i < lines.length && !(lines[i] ?? "").trimStart().startsWith(marker)) i++;
+      const close = new RegExp(`^ {0,3}${marker[0]}{${marker.length},}[ \t]*$`);
+      while (i < lines.length && !close.test(lines[i] ?? "")) i++;
       if (i < lines.length) i++; // closing fence
       blocks.push({
         type: "code",
@@ -68,9 +70,9 @@ export function toBlocks(markdown: string): Block[] {
     const heading = ATX.exec(line);
     if (heading?.[1] && heading[2]) {
       const level = heading[1].length;
-      path.length = Math.min(path.length, level - 1);
-      path[level - 1] = heading[2];
-      path.length = level;
+      while (headings.length && headings.at(-1)!.level >= level) headings.pop();
+      headings.push({ level, heading: heading[2] });
+      path = headings.map((h) => h.heading);
       blocks.push({
         type: "heading",
         text: line,

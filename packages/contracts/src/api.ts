@@ -46,14 +46,15 @@ export const DocumentSummary = z
   .meta({ id: "DocumentSummary" });
 
 export const DocumentDetail = DocumentSummary.extend({
+  extraction: z.record(z.string(), z.unknown()).nullable().optional(),
   token_count: z.number().int().nullable(),
   stage_error: z.string().nullable(),
   /** Which pipeline stage failed. Null unless status is `failed`. */
   failed_stage: z.string().nullable(),
   /**
    * Set when these bytes were already stored under another id. The document
-   * is kept rather than rejected — the caller holds this id — but nothing
-   * was re-processed; follow the pointer for the content.
+   * is kept rather than rejected — the caller holds this id — and carries its own derived content. This pointer records dedupe provenance;
+   * it is not a redirect, because either document may later be revised.
    */
   duplicate_of: z.guid().nullable(),
   /** Bumped when a customId was re-ingested with different content. */
@@ -74,7 +75,7 @@ export const UploadRequest = z
     container: ContainerTag,
     filename: z.string().min(1).max(500),
     contentType: z.string().min(1).max(255),
-    customId: z.string().max(255).optional(),
+    customId: z.string().min(1).max(255).optional(),
   })
   .meta({ id: "UploadRequest" });
 
@@ -83,6 +84,8 @@ export const UploadResponse = z
     id: z.guid(),
     /** PUT the bytes here directly. They never pass through the API. */
     uploadUrl: z.string(),
+    /** Pass as ?revision=N when completing the upload. */
+    revision: z.number().int().positive().default(1),
     expiresInSeconds: z.number().int(),
   })
   .meta({ id: "UploadResponse" });

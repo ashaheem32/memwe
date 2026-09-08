@@ -1,6 +1,6 @@
 import type { Job } from "@memwe/contracts";
 import { DocumentJobPayload, MemweError } from "@memwe/contracts";
-import { tx } from "@memwe/db";
+import { documentTx } from "./guard.js";
 import type { StageContext } from "./index.js";
 
 /**
@@ -10,10 +10,10 @@ import type { StageContext } from "./index.js";
  * so the caller gets the existing id back synchronously). What's left
  * here is admitting the document into the pipeline and handing off.
  */
-export async function accept(job: Job, ctx: StageContext): Promise<void> {
+export async function accept(job: Job, ctx: StageContext): Promise<undefined> {
   const p = DocumentJobPayload.parse(job.payload);
 
-  await tx(async (c) => {
+  await documentTx(job, async (c) => {
     const { rows } = await c.query<{ id: string; status: string; markdown: string | null }>(
       `select id::text, status::text, markdown from documents where id = $1 for update`,
       [p.documentId],

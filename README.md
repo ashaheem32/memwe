@@ -27,6 +27,7 @@ pnpm install
 cp .env.example .env
 pnpm up          # docker compose + wait + migrate
 pnpm seed        # 2 orgs, 7 docs, 1 dev API key
+pnpm --filter @memwe/worker exec playwright install chromium   # once; URL ingestion renders JS pages with it
 
 pnpm dev:api     # terminal 1
 pnpm dev:worker  # terminal 2
@@ -77,8 +78,92 @@ source. `find . -name "._*" -not -path "*/node_modules/*" -delete` clears them.
 exFAT also has no permission bits, so executable flags and file modes will not
 survive in git. If this project outlives Sprint 0, move it to an APFS volume.
 
+## Ingestion semantics
+
+These are the guarantees the pipeline makes today. `docs/ingestion-review.md`
+records the defects that produced them.
+
+**Identity and revisions.** A document is identified by `customId` within a
+container. Re-ingesting a `customId` with different content (or a different
+title or metadata) keeps the id and bumps `revision`; identical content is
+deduped and returns `deduped: true` with no new work. Every job carries the
+revision it was enqueued for, and a stage that finds a newer revision on the
+row aborts without writing. Chunks are stored per revision and are readable
+through the app role only when their revision is the document's current one
+and the document is `done`. Presigned uploads follow the same rule: `/upload`
+returns a `revision`, and `/upload/{id}/complete?revision=N` is refused with
+409 when a newer upload has been requested. Completion copies the bytes to a
+sealed key, so a PUT URL that is reused after completion cannot change what
+the worker reads.
+
+**URLs.** `POST /v1/documents` with `url` instead of `content` creates a
+document with no bytes; the extract stage fetches them once, keeps the
+snapshot in blob storage under that revision, and from then on the document
+behaves like an upload. Retries, reprocessing and dedupe read the snapshot,
+never the site. The fetch is plain HTTP first; when the page is a JavaScript
+shell, or `URL_FETCH_MODE=headless`, it is rendered in a headless Chromium
+with images, media and fonts blocked. A URL that answers with a PDF or plain
+text goes to that extractor. HTML goes through Readability to drop
+navigation, banners and footers, then to a serializer that writes block
+structure (headings, lists, code, tables, quotes) as markdown and nothing
+inline, so every line still maps to a line of the page text exactly. Private,
+loopback, link-local and cloud-metadata addresses are refused at the API and
+again in the worker on every redirect hop and every request the browser
+makes; `URL_ALLOW_PRIVATE=true` is for local development only. The same
+address in a container is the same document unless a `customId` makes it a
+revision; identical bytes from two addresses dedupe by hash. What the fetch
+did is recorded under `metadata.fetch`.
+
+**Handoffs.** A stage commits its writes, the status change, and the next job
+in one transaction. Queue completion, heartbeat, retry, and kill are fenced by
+the worker's lease; an old worker cannot act on its replacement's job. A job
+the reaper exhausts marks the document `failed`.
+
+**Offsets.** `NormalizedDoc.spanMap` offsets are UTF-16 code units into the
+decoded source text (BOM included), or into the page text for PDFs, which
+also carry `page`. For HTML the source is the page text: the readable text,
+one block per line, derived deterministically from the stored snapshot. A resolved
+`SourceLocation` reports `exact: false` when
+normalization rewrote the range (ligatures, de-hyphenation, OCR), in which
+case the offsets are the enclosing line rather than the exact characters. A
+span map past its size limit is truncated, never extrapolated. Chunk rows
+carry `source_ranges` so overlap and generated fence delimiters are
+distinguishable from source text.
+
+**Partial extraction.** A PDF over `PDF_MAX_PAGES` or with pages that needed
+OCR but were skipped (OCR disabled, or past the OCR page cap) still completes, but `GET /v1/documents/{id}`
+returns `extraction.partial: true` with `totalPages`, `pages`, and
+`ocrSkipped` so the caller can see what is missing.
+
+**Contextual chunk headers.** After chunking, `document.contextualize` asks
+a model for a one-to-two sentence context per chunk: one request per
+document, with the whole document first and every pending chunk after it,
+answered in one structured response. A document with more chunks than
+`CONTEXT_CHUNKS_PER_PASS` takes several passes, and then the document block
+carries a prompt-cache breakpoint so later passes read it from cache. Each
+pass is written before the next request, so a retry only sends what is
+missing. A revision keeps a chunk's context when its text, heading path and
+model are unchanged. Refusals and documents over `CONTEXT_MAX_DOC_TOKENS`
+fall back to the heading path and are recorded under `metadata.context`
+with the token usage. Without `ANTHROPIC_API_KEY` the stage is a no-op.
+Whether the prefix really comes back from cache is asserted by
+`tests/context-live.test.ts`, which spends a few cents and is opt-in:
+`RUN_LIVE_MODEL_TESTS=1 pnpm test`. CI runs it whenever the
+`ANTHROPIC_API_KEY` repository secret is set; fork PRs skip it.
+
+**Embeddings.** The embedding input is the generated context, then the
+heading path, then the chunk text. Vectors are reused only when that full
+input and the model match. Each successful provider batch is written before
+the next one is sent, so a failure part way through is not re-billed on
+retry.
+
+**What `done` means.** The current revision has markdown, chunks, and a
+vector for every chunk. `document.index` is not registered yet; the runner
+marks `done` after `document.embed`. Retrieval over `done` documents is the
+next milestone.
+
 ## What is deliberately not built yet
 
-Real extraction. `apps/worker/src/stages/extract.ts` is a stub that only
-advances the state machine — building a PDF parser before the runner is
-trustworthy is the classic Sprint 0 trap. Sprint 1 replaces it.
+`document.index`. It is the next unregistered stage in
+`apps/worker/src/stages/index.ts`; its completion contract needs agreement
+with the platform track before it exposes anything to `retrieve()`.

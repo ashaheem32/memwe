@@ -1,138 +1,171 @@
-import { createHash } from "node:crypto";
-import type { Acl, Job, TrustTier } from "@memwe/contracts";
-import { DocumentJobPayload, MemweError } from "@memwe/contracts";
-import { tx } from "@memwe/db";
-import { getObject } from "@memwe/storage";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  type Acl,
+  DocumentJobPayload,
+  type Job,
+  MemweError,
+  type TrustTier,
+} from "@memwe/contracts";
+import { blobKey, getObject, putObject } from "@memwe/storage";
+import { tokens } from "../chunk/tokens.js";
 import { extract } from "../extract/index.js";
+import { fetchConfig, fetchUrl } from "../fetch/index.js";
+import { documentTx } from "./guard.js";
 import type { StageContext, StageResult } from "./index.js";
 
 type Row = {
   blob_key: string | null;
+  source_content: string | null;
   markdown: string | null;
+  source: string;
   source_uri: string | null;
   mime: string | null;
   title: string | null;
-  container: string;
-  org_id: string;
   acl: Acl;
   trust: TrustTier;
+  metadata: { fetch?: { charset?: string | null } };
 };
 
-/**
- * Stage 02 — extract.
- *
- * Bytes in, NormalizedDoc out. Everything format-specific stops here: the
- * rest of the pipeline only ever sees markdown, a span map and a section
- * tree, which is what keeps adding a connector from touching chunking.
- */
 export async function extractStage(job: Job, ctx: StageContext): Promise<StageResult> {
   const p = DocumentJobPayload.parse(job.payload);
-
-  const row = await tx(async (c) => {
-    const r = await c.query<Row>(
-      `select blob_key, markdown, source_uri, mime, title, container, org_id::text,
-              acl, trust::text as trust
-         from documents where id = $1`,
-      [p.documentId],
-    );
-    return r.rows[0];
-  });
-  if (!row) throw new MemweError("not_found", `document ${p.documentId} vanished`);
-
-  // Where the bytes come from, in order of authority.
+  const row = await documentTx(
+    job,
+    async (c) =>
+      (
+        await c.query<Row>(
+          `select blob_key,source_content,markdown,source,source_uri,mime,title,acl,trust,metadata
+             from documents where id=$1`,
+          [p.documentId],
+        )
+      ).rows[0]!,
+  );
   let bytes: Buffer;
-  if (row.blob_key) {
-    bytes = await getObject(row.blob_key);
-  } else if (row.markdown !== null) {
-    bytes = Buffer.from(row.markdown, "utf8");
-  } else if (row.source_uri) {
-    // Sprint 1, next task. Fail clean rather than pretend.
-    throw new MemweError("unsupported_content", "URL fetching is not implemented yet");
-  } else {
-    throw new MemweError("unsupported_content", "document has no content, blob or URL");
-  }
-
-  // The real content hash, computed where the bytes actually are.
-  //
-  // /upload cannot know it: it hands out a presigned URL before any bytes
-  // exist, so it stamps a placeholder derived from the blob key. That
-  // placeholder is unique per document by construction, which meant the
-  // same file uploaded twice was extracted, chunked and embedded twice.
-  if (row.blob_key) {
-    const realHash = createHash("sha256").update(bytes).digest();
-    const duplicate = await tx(async (c) => {
-      const r = await c.query<{ id: string }>(
-        `select id::text from documents
-          where org_id = $1 and container = $2 and content_hash = $3
-            and duplicate_of is null and id <> $4`,
-        [row.org_id, row.container, realHash, p.documentId],
-      );
-      return r.rows[0]?.id ?? null;
-    });
-
-    if (duplicate) {
-      // Keep the row rather than deleting it — the caller holds this id and
-      // deserves an answer, not a 404. Point it at the original and stop.
-      await tx(async (c) => {
-        await c.query(
-          `update documents
-              set duplicate_of = $2, status = 'done',
-                  status_changed_at = now(), updated_at = now()
-            where id = $1`,
-          [p.documentId, duplicate],
-        );
-      });
-      ctx.log.info("duplicate upload", { documentId: p.documentId, duplicateOf: duplicate });
-      return { halt: true, reason: `identical bytes already stored as ${duplicate}` };
+  if (row.blob_key) bytes = await getObject(row.blob_key);
+  else if (row.source === "url" && row.source_uri) bytes = await fetchSource(job, row, ctx);
+  else if (row.source_content !== null || row.markdown !== null)
+    bytes = Buffer.from(row.source_content ?? row.markdown!, "utf8");
+  else throw new MemweError("unsupported_content", "document has no content");
+  const realHash = createHash("sha256").update(bytes).digest();
+  const reused = await documentTx(job, async (c) => {
+    // The shared container lock makes the hash claim and duplicate lookup atomic.
+    const original = (
+      await c.query<{
+        id: string;
+        status: string;
+        markdown: string | null;
+        span_map: unknown;
+        mime: string;
+        metadata: Record<string, unknown>;
+        token_count: number | null;
+      }>(
+        `select id::text,status::text,markdown,span_map,mime,metadata,token_count from documents
+      where org_id=$1 and container=$2 and content_hash=$3 and duplicate_of is null and id<>$4
+      order by created_at,id limit 1`,
+        [p.orgId, p.container, realHash, p.documentId],
+      )
+    ).rows[0];
+    await c.query(
+      `update documents set content_hash=$2,duplicate_of=$3,
+      source_content=case when blob_key is null then coalesce(source_content,markdown) else source_content end
+      where id=$1`,
+      [p.documentId, realHash, original?.id ?? null],
+    );
+    if (original && original.status !== "done" && original.status !== "failed") {
+      // Returning commits the hash claim. The retry below waits for the canonical extraction.
+      return { waiting: true } as const;
     }
-
-    await tx(async (c) => {
-      await c.query(`update documents set content_hash = $2 where id = $1`, [
-        p.documentId,
-        realHash,
-      ]);
-    });
+    if (original?.status === "done" && original.markdown && original.span_map) {
+      const stats = original.metadata.extraction as Record<string, unknown> | undefined;
+      await c.query(
+        `update documents set markdown=$2,span_map=$3,mime=$4,title=$5,token_count=$6,
+        metadata=metadata || $7::jsonb,stage_error=null,updated_at=now() where id=$1`,
+        [
+          p.documentId,
+          original.markdown,
+          JSON.stringify(original.span_map),
+          original.mime,
+          stats?.contentTitle ?? row.title,
+          original.token_count,
+          JSON.stringify({
+            sections: original.metadata.sections ?? [],
+            extraction: { ...stats, reusedFrom: original.id },
+          }),
+        ],
+      );
+      return { reused: true } as const;
+    }
+    return null;
+  });
+  if (reused && "waiting" in reused) return { deferMs: 2000 };
+  if (reused) {
+    ctx.log.info("reused extraction", { documentId: p.documentId });
+    return;
   }
-
   const { doc, stats } = await extract(
     {
       bytes,
       declaredMime: row.mime,
+      charset: row.metadata.fetch?.charset ?? null,
       filename: row.title,
-      // Carried through, not invented. The ACL-intersection rule and the
-      // never-inject-untrusted-text rule both read these off the memories
-      // that eventually derive from this document.
       sourceUri: row.source_uri,
       acl: row.acl,
       trust: row.trust,
     },
     ctx.log,
   );
-
-  await tx(async (c) => {
+  await documentTx(job, async (c) => {
     await c.query(
-      `update documents
-          set markdown = $2,
-              span_map = $3,
-              mime = $4,
-              title = coalesce(nullif($5, ''), title),
-              token_count = $6,
-              metadata = metadata || $7::jsonb,
-              stage_error = null,
-              updated_at = now()
-        where id = $1`,
+      `update documents set markdown=$2,span_map=$3,mime=$4,title=coalesce(nullif($5,''),title),
+      token_count=$6,metadata=metadata || $7::jsonb,stage_error=null,updated_at=now() where id=$1`,
       [
         p.documentId,
         doc.markdown,
         JSON.stringify(doc.spanMap),
         doc.mime,
         doc.title ?? "",
-        // Rough until a real tokenizer lands with embedding in Sprint 1.
-        Math.ceil(doc.markdown.length / 4),
+        tokens.count(doc.markdown),
         JSON.stringify({ extraction: stats, sections: doc.sections }),
       ],
     );
   });
-
   ctx.log.info("extracted", { documentId: p.documentId, ...stats });
+}
+
+/**
+ * A URL document has no bytes until here. Fetch them once, keep the
+ * snapshot in blob storage under this revision, and record how the fetch
+ * went on the row. From then on the document is an upload: retries,
+ * dedupe by hash, and reprocessing all read the snapshot, never the site.
+ */
+async function fetchSource(job: Job, row: Row, ctx: StageContext): Promise<Buffer> {
+  const p = DocumentJobPayload.parse(job.payload);
+  // Check before spending network time, then fence the write again after.
+  await documentTx(job, async () => {});
+  const fetched = await fetchUrl(row.source_uri!, fetchConfig(), ctx.log);
+  const key = `${blobKey(p.orgId, p.documentId)}/${p.revision}/fetch/${randomUUID()}`;
+  await putObject(key, fetched.bytes, fetched.contentType ?? undefined);
+  const stats = {
+    finalUrl: fetched.finalUrl,
+    status: fetched.status,
+    via: fetched.via,
+    rendered: fetched.rendered ?? null,
+    redirects: fetched.redirects,
+    contentType: fetched.contentType,
+    charset: fetched.charset,
+    bytes: fetched.bytes.byteLength,
+    elapsedMs: fetched.elapsedMs,
+    fetchedAt: new Date().toISOString(),
+  };
+  await documentTx(job, async (c) => {
+    await c.query(
+      `update documents set blob_key=$2,mime=$3,metadata=metadata||jsonb_build_object('fetch',$4::jsonb),
+        updated_at=now() where id=$1`,
+      [p.documentId, key, fetched.contentType, JSON.stringify(stats)],
+    );
+  });
+  row.blob_key = key;
+  row.mime = fetched.contentType;
+  row.metadata = { ...row.metadata, fetch: { charset: fetched.charset } };
+  ctx.log.info("fetched", { documentId: p.documentId, ...stats });
+  return fetched.bytes;
 }

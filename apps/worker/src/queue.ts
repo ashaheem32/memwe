@@ -1,5 +1,5 @@
 import type { Job, JobType } from "@memwe/contracts";
-import { pool } from "@memwe/db";
+import { lockIngestion, type PoolClient, pool, tx } from "@memwe/db";
 
 /**
  * The queue interface. Everything the runner uses lives here, so
@@ -7,12 +7,12 @@ import { pool } from "@memwe/db";
  * file and no call-site changes.
  */
 export interface Queue {
-  enqueue(input: EnqueueInput): Promise<string | null>;
+  enqueue(input: EnqueueInput, client?: PoolClient): Promise<string | null>;
   claim(workerId: string, limit: number): Promise<Job[]>;
-  complete(id: string): Promise<void>;
-  retry(id: string, error: string, delayMs: number): Promise<void>;
-  kill(id: string, error: string): Promise<void>;
-  heartbeat(ids: string[]): Promise<void>;
+  complete(job: Job, client?: PoolClient): Promise<boolean>;
+  retry(job: Job, error: string, delayMs: number): Promise<void>;
+  kill(job: Job, error: string, client?: PoolClient): Promise<boolean>;
+  heartbeat(jobs: Job[]): Promise<void>;
   reap(staleAfterMs: number): Promise<number>;
   depth(): Promise<{ pending: number; running: number; dead: number }>;
 }
@@ -37,8 +37,8 @@ type JobRow = {
 };
 
 export class PgQueue implements Queue {
-  async enqueue(input: EnqueueInput): Promise<string | null> {
-    const { rows } = await pool.query<{ id: string }>(
+  async enqueue(input: EnqueueInput, client?: PoolClient): Promise<string | null> {
+    const { rows } = await (client ?? pool).query<{ id: string }>(
       `insert into jobs (type, payload, trace_id, dedupe_key, run_at, max_attempts)
        values ($1, $2, $3, $4, coalesce($5, now()), coalesce($6, 5))
        on conflict do nothing
@@ -87,55 +87,79 @@ export class PgQueue implements Queue {
       attempts: r.attempts,
       maxAttempts: r.max_attempts,
       traceId: r.trace_id ?? "unknown",
+      lockedBy: workerId,
     }));
   }
 
-  async complete(id: string): Promise<void> {
+  async complete(job: Job, client?: PoolClient): Promise<boolean> {
+    const r = await (client ?? pool).query(
+      `update jobs set status='done', locked_by=null, heartbeat_at=null, updated_at=now()
+       where id=$1 and status='running' and locked_by=$2 and attempts=$3`,
+      [job.id, job.lockedBy, job.attempts],
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async retry(job: Job, error: string, delayMs: number): Promise<void> {
     await pool.query(
-      `update jobs set status='done', locked_by=null, heartbeat_at=null, updated_at=now() where id=$1`,
-      [id],
+      `update jobs set status='pending', run_at=now()+make_interval(secs=>$4::float8),
+         last_error=$5, locked_by=null, locked_at=null, heartbeat_at=null, updated_at=now()
+       where id=$1 and status='running' and locked_by=$2 and attempts=$3`,
+      [job.id, job.lockedBy, job.attempts, delayMs / 1000, error.slice(0, 2000)],
     );
   }
 
-  async retry(id: string, error: string, delayMs: number): Promise<void> {
+  async kill(job: Job, error: string, client?: PoolClient): Promise<boolean> {
+    const r = await (client ?? pool).query(
+      `update jobs set status='dead', last_error=$4, locked_by=null, heartbeat_at=null, updated_at=now()
+       where id=$1 and status='running' and locked_by=$2 and attempts=$3`,
+      [job.id, job.lockedBy, job.attempts, error.slice(0, 2000)],
+    );
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async heartbeat(jobs: Job[]): Promise<void> {
+    if (jobs.length === 0) return;
     await pool.query(
-      `update jobs
-          set status='pending', run_at = now() + make_interval(secs => $2::float8),
-              last_error=$3, locked_by=null, locked_at=null, heartbeat_at=null, updated_at=now()
-        where id=$1`,
-      [id, delayMs / 1000, error.slice(0, 2000)],
+      `update jobs j set heartbeat_at=now()
+       from jsonb_to_recordset($1::jsonb) as v(id bigint, owner text, attempt int)
+       where j.id=v.id and j.locked_by=v.owner and j.attempts=v.attempt and j.status='running'`,
+      [JSON.stringify(jobs.map((j) => ({ id: j.id, owner: j.lockedBy, attempt: j.attempts })))],
     );
   }
 
-  async kill(id: string, error: string): Promise<void> {
-    await pool.query(
-      `update jobs set status='dead', last_error=$2, locked_by=null, heartbeat_at=null, updated_at=now()
-        where id=$1`,
-      [id, error.slice(0, 2000)],
-    );
-  }
-
-  async heartbeat(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await pool.query(`update jobs set heartbeat_at=now() where id = any($1::bigint[])`, [ids]);
-  }
-
-  /**
-   * Workers die mid-stage. Without this, those jobs sit in 'running'
-   * forever and the document never finishes — the single most common way
-   * a queue quietly stops working.
-   */
   async reap(staleAfterMs: number): Promise<number> {
-    const { rowCount } = await pool.query(
-      `update jobs
-          set status = case when attempts >= max_attempts then 'dead'::job_status else 'pending'::job_status end,
-              last_error = coalesce(last_error, 'worker stopped heartbeating'),
-              locked_by = null, heartbeat_at = null, updated_at = now()
-        where status = 'running'
-          and heartbeat_at < now() - make_interval(secs => $1::float8)`,
+    const candidates = await pool.query<{ id: string; payload: Record<string, unknown> }>(
+      `select id::text, payload from jobs where status='running'
+       and heartbeat_at < now()-make_interval(secs=>$1::float8)`,
       [staleAfterMs / 1000],
     );
-    return rowCount ?? 0;
+    let count = 0;
+    for (const candidate of candidates.rows) {
+      count += await tx(async (c) => {
+        const p = candidate.payload;
+        if (typeof p.orgId === "string" && typeof p.container === "string") {
+          await lockIngestion(c, p.orgId, p.container);
+        }
+        const r = await c.query<{ status: string; type: string }>(
+          `update jobs set status=case when attempts>=max_attempts then 'dead'::job_status else 'pending'::job_status end,
+           last_error='worker stopped heartbeating', locked_by=null, heartbeat_at=null, updated_at=now()
+           where id=$1 and status='running' and heartbeat_at < now()-make_interval(secs=>$2::float8)
+           returning status::text, type`,
+          [candidate.id, staleAfterMs / 1000],
+        );
+        if (r.rows[0]?.status === "dead" && typeof p.documentId === "string") {
+          await c.query(
+            `update documents set status='failed', failed_stage=$4,
+            stage_error='worker stopped heartbeating; attempts exhausted', status_changed_at=now(), updated_at=now()
+            where id::text=$1 and org_id::text=$2 and container=$3 and revision=$5 and status not in ('done','failed')`,
+            [p.documentId, p.orgId, p.container, r.rows[0].type, p.revision ?? 1],
+          );
+        }
+        return r.rowCount ?? 0;
+      });
+    }
+    return count;
   }
 
   async depth(): Promise<{ pending: number; running: number; dead: number }> {

@@ -1,5 +1,6 @@
 import type { Readable } from "node:stream";
 import {
+  CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
@@ -87,4 +88,15 @@ export async function objectExists(key: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Copy completed uploads away from the still-valid public PUT key. */
+export async function copyObject(from: string, to: string): Promise<void> {
+  await s3.send(
+    new CopyObjectCommand({
+      Bucket: BUCKET,
+      Key: to,
+      CopySource: `${BUCKET}/${from.split("/").map(encodeURIComponent).join("/")}`,
+    }),
+  );
 }

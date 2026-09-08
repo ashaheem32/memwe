@@ -1,110 +1,91 @@
 import { createHash } from "node:crypto";
-import type { Job, Section } from "@memwe/contracts";
-import { DocumentJobPayload, MemweError } from "@memwe/contracts";
-import { tx } from "@memwe/db";
+import { DocumentJobPayload, type Job, MemweError, type Section } from "@memwe/contracts";
 import { chunkDocument, contextHeader } from "../chunk/index.js";
+import { contextProvider } from "../context/index.js";
+import { documentTx } from "./guard.js";
 import type { StageContext } from "./index.js";
 
-type Row = {
-  markdown: string | null;
-  title: string | null;
-  org_id: string;
-  container: string;
-  metadata: { sections?: Section[] } | null;
+/** What gets embedded: generated context, then heading path, then the text. */
+export const embeddingInput = (
+  text: string,
+  header: string | null,
+  context: string | null = null,
+): string => {
+  const preface = [context, header].filter((s): s is string => Boolean(s)).join("\n");
+  return preface ? `${preface}\n\n${text}` : text;
 };
+export const inputHash = (text: string, header: string | null, context: string | null = null) =>
+  createHash("sha256")
+    .update(embeddingInput(text, header, context))
+    .digest("hex");
 
-/**
- * Stage 04 — chunk.
- *
- * Splits the normalized markdown on its section tree and packs to a token
- * budget. Chunks carry the markdown offsets they came from, so a chunk
- * resolves through the document's span map back to a page and a bounding
- * box without storing anything twice.
- */
-export async function chunkStage(job: Job, ctx: StageContext): Promise<void> {
+export async function chunkStage(job: Job, ctx: StageContext): Promise<undefined> {
   const p = DocumentJobPayload.parse(job.payload);
-
-  const row = await tx(async (c) => {
-    const r = await c.query<Row>(
-      `select markdown, title, org_id::text, container, metadata
-         from documents where id = $1`,
-      [p.documentId],
+  await documentTx(job, async (c) => {
+    const row = (
+      await c.query<{
+        markdown: string | null;
+        title: string | null;
+        metadata: { sections?: Section[] };
+      }>(`select markdown,title,metadata from documents where id=$1`, [p.documentId])
+    ).rows[0]!;
+    if (!row.markdown?.trim()) throw new MemweError("unsupported_content", "nothing to chunk");
+    const doc = { markdown: row.markdown, title: row.title, sections: row.metadata.sections ?? [] };
+    const chunks = chunkDocument(doc, ctx.log);
+    // A generated context survives a revision only when the chunk text, its
+    // heading path and the model are all unchanged — that is the whole input
+    // it was written from, minus the rest of the document. Anything else is
+    // regenerated, which is what keeps embedding reuse honest.
+    const writer = contextProvider();
+    const carried = new Map<string, string>();
+    if (writer) {
+      const prior = await c.query<{ key: string; generated_context: string }>(
+        `select encode(text_hash,'hex')||E'\n'||coalesce(context_header,'') as key,generated_context
+           from chunks where document_id=$1 and container=$2
+            and generated_context is not null and context_model=$3`,
+        [p.documentId, p.container, writer.id],
+      );
+      for (const r of prior.rows) carried.set(r.key, r.generated_context);
+    }
+    const rows = chunks.map((k) => {
+      const header = contextHeader(doc, k);
+      const textHash = createHash("sha256").update(k.text).digest("hex");
+      const context = carried.get(`${textHash}\n${header ?? ""}`) ?? null;
+      return {
+        ord: k.ord,
+        text: k.text,
+        context_header: header,
+        generated_context: context,
+        context_model: context && writer ? writer.id : null,
+        span_start: k.spanStart,
+        span_end: k.spanEnd,
+        token_count: k.tokenCount,
+        source_ranges: k.sourceRanges,
+        text_hash: textHash,
+        embedding_input_hash: inputHash(k.text, header, context),
+      };
+    });
+    // Cache entries include the exact full input and their model stamp. The embed
+    // stage replaces entries from a different model. Reuse is tenant/container-local.
+    await c.query(
+      `with old as materialized (
+      select distinct on (embedding_input_hash) embedding_input_hash,embedding,embed_model,embed_dim,embedded_at
+      from chunks where org_id=$3 and container=$2 and embedding is not null and embedding_input_hash is not null
+      order by embedding_input_hash,embedded_at desc
+    ), del as (delete from chunks where document_id=$1 and container=$2)
+    insert into chunks (document_id,org_id,container,revision,ord,text,context_header,generated_context,context_model,
+      span_start,span_end,token_count,source_ranges,text_hash,embedding_input_hash,embedding,embed_model,embed_dim,embedded_at)
+    select $1,$3,$2,$5,(v->>'ord')::int,v->>'text',v->>'context_header',v->>'generated_context',v->>'context_model',
+      (v->>'span_start')::int,(v->>'span_end')::int,(v->>'token_count')::int,v->'source_ranges',decode(v->>'text_hash','hex'),
+      decode(v->>'embedding_input_hash','hex'),o.embedding,o.embed_model,o.embed_dim,o.embedded_at
+    from jsonb_array_elements($4::jsonb) v left join old o on o.embedding_input_hash=decode(v->>'embedding_input_hash','hex')`,
+      [p.documentId, p.container, p.orgId, JSON.stringify(rows), p.revision],
     );
-    return r.rows[0];
-  });
-  if (!row) throw new MemweError("not_found", `document ${p.documentId} vanished`);
-  if (!row.markdown || row.markdown.trim().length === 0) {
-    throw new MemweError("unsupported_content", "nothing to chunk — extraction produced no text");
-  }
-
-  const doc = {
-    title: row.title,
-    markdown: row.markdown,
-    sections: row.metadata?.sections ?? [],
-  };
-
-  const chunks = chunkDocument(doc as never, ctx.log);
-  if (chunks.length === 0) {
-    throw new MemweError("unsupported_content", "chunking produced nothing");
-  }
-
-  const rows = chunks.map((k) => ({
-    ord: k.ord,
-    text: k.text,
-    context_header: contextHeader(doc as never, k),
-    span_start: k.spanStart,
-    span_end: k.spanEnd,
-    token_count: k.tokenCount,
-    text_hash: createHash("sha256").update(k.text).digest("hex"),
-  }));
-
-  // Re-chunking replaces rather than appends — a document revised in place
-  // would otherwise accumulate every generation of its chunks and serve
-  // stale text from search forever.
-  //
-  // But an unchanged chunk keeps its vector. Editing one paragraph of a
-  // 400-page report should re-embed a couple of chunks, not thousands, and
-  // embedding is the expensive half of ingest.
-  //
-  // One statement: `old` is materialised from the pre-delete snapshot, and
-  // a data-modifying CTE always runs to completion whether or not the
-  // primary query reads it — so the vectors never travel through Node.
-  const reused = await tx(async (c) => {
-    const r = await c.query<{ reused: boolean }>(
-      `with old as (
-         select distinct on (text_hash) text_hash, embedding, embed_model, embed_dim, embedded_at
-           from chunks
-          where document_id = $1 and container = $2
-            and embedding is not null and text_hash is not null
-       ),
-       del as (
-         delete from chunks where document_id = $1 and container = $2
-       )
-       insert into chunks (document_id, org_id, container, ord, text, context_header,
-                           span_start, span_end, token_count, text_hash,
-                           embedding, embed_model, embed_dim, embedded_at)
-       select $1, $3, $2,
-              (v->>'ord')::int, v->>'text', v->>'context_header',
-              (v->>'span_start')::int, (v->>'span_end')::int, (v->>'token_count')::int,
-              decode(v->>'text_hash', 'hex'),
-              o.embedding, o.embed_model, o.embed_dim,
-              o.embedded_at
-         from jsonb_array_elements($4::jsonb) as v
-         left join old o on o.text_hash = decode(v->>'text_hash', 'hex')
-       returning (embedding is not null) as reused`,
-      [p.documentId, row.container, row.org_id, JSON.stringify(rows)],
-    );
-    return r.rows.filter((x) => x.reused).length;
-  });
-
-  const counts = chunks.map((k) => k.tokenCount).sort((a, b) => a - b);
-  ctx.log.info("chunked", {
-    documentId: p.documentId,
-    chunks: chunks.length,
-    reusedEmbeddings: reused,
-    medianTokens: counts[Math.floor(counts.length / 2)],
-    minTokens: counts[0],
-    maxTokens: counts[counts.length - 1],
-    withOverlap: chunks.filter((k) => k.overlapTokens > 0).length,
+    ctx.log.info("chunked", {
+      documentId: p.documentId,
+      chunks: chunks.length,
+      contextCarried: rows.filter((r) => r.generated_context).length,
+      maxTokens: Math.max(...chunks.map((k) => k.tokenCount)),
+    });
   });
 }
