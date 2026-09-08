@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { DocStatus } from "./normalized-doc.js";
+import { DocStatus, IngestRequest } from "./normalized-doc.js";
 import { ContainerTag } from "./tenant.js";
 
 /**
@@ -45,8 +45,28 @@ export const DocumentSummary = z
   })
   .meta({ id: "DocumentSummary" });
 
+/**
+ * What the last revision changed, counted in chunks. A chunk is the same
+ * chunk when its text and heading path are unchanged; it then keeps its
+ * row, context and vector and only moves. `from` is null for revision 1.
+ */
+export const RevisionDiff = z
+  .object({
+    from: z.number().int().positive().nullable(),
+    to: z.number().int().positive(),
+    kept: z.number().int().nonnegative(),
+    added: z.number().int().nonnegative(),
+    removed: z.number().int().nonnegative(),
+    /** Kept chunks whose position changed. */
+    moved: z.number().int().nonnegative(),
+  })
+  .meta({ id: "RevisionDiff" });
+export type RevisionDiff = z.infer<typeof RevisionDiff>;
+
 export const DocumentDetail = DocumentSummary.extend({
   extraction: z.record(z.string(), z.unknown()).nullable().optional(),
+  /** Chunk-level diff of the current revision against the previous one. */
+  diff: RevisionDiff.nullable().optional(),
   token_count: z.number().int().nullable(),
   stage_error: z.string().nullable(),
   /** Which pipeline stage failed. Null unless status is `failed`. */
@@ -99,4 +119,37 @@ export const HealthResponse = z
   .meta({ id: "HealthResponse" });
 
 export type IngestResponse = z.infer<typeof IngestResponse>;
+
+export const BATCH_MAX_ITEMS = 100;
+
+/**
+ * Many documents in one request. Items are processed in order, each in its
+ * own transaction, so an item can fail without undoing the ones before it
+ * and two identical items dedupe against each other. The envelope is
+ * validated as a whole: a malformed item is a 400 for the request, since
+ * that is a caller bug rather than a per-document outcome.
+ */
+export const BatchIngestRequest = z
+  .object({ items: z.array(IngestRequest).min(1).max(BATCH_MAX_ITEMS) })
+  .meta({ id: "BatchIngestRequest" });
+export type BatchIngestRequest = z.infer<typeof BatchIngestRequest>;
+
+export const BatchIngestItem = z
+  .object({
+    /** Position in `items`. Results come back in the same order. */
+    index: z.number().int().nonnegative(),
+    result: IngestResponse.optional(),
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+  })
+  .meta({ id: "BatchIngestItem" });
+export type BatchIngestItem = z.infer<typeof BatchIngestItem>;
+
+export const BatchIngestResponse = z
+  .object({
+    results: z.array(BatchIngestItem),
+    accepted: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  })
+  .meta({ id: "BatchIngestResponse" });
+export type BatchIngestResponse = z.infer<typeof BatchIngestResponse>;
 export type UploadResponse = z.infer<typeof UploadResponse>;

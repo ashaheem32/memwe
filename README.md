@@ -86,7 +86,14 @@ records the defects that produced them.
 **Identity and revisions.** A document is identified by `customId` within a
 container. Re-ingesting a `customId` with different content (or a different
 title or metadata) keeps the id and bumps `revision`; identical content is
-deduped and returns `deduped: true` with no new work. Every job carries the
+deduped and returns `deduped: true` with no new work. A revision does not
+rebuild the document: the chunk stage diffs the new chunks against the
+current rows by text and heading path, keeps unchanged rows in place with
+their ids, contexts and vectors, inserts what changed, deletes what went,
+and records the counts under `metadata.diff` (returned as `diff` on the
+document). Only the new rows reach the context and embedding stages, so a
+one-paragraph edit costs one paragraph of model calls, and a citation of an
+unchanged chunk survives the revision. Every job carries the
 revision it was enqueued for, and a stage that finds a newer revision on the
 row aborts without writing. Chunks are stored per revision and are readable
 through the app role only when their revision is the document's current one
@@ -95,6 +102,12 @@ returns a `revision`, and `/upload/{id}/complete?revision=N` is refused with
 409 when a newer upload has been requested. Completion copies the bytes to a
 sealed key, so a PUT URL that is reused after completion cannot change what
 the worker reads.
+
+**Batches.** `POST /v1/documents/batch` takes up to 100 items of the single
+ingest shape and answers per item, in order, with either a result or an
+error. Items run one after another in their own transactions, so an item
+that is refused does not undo the ones before it and two identical items
+dedupe against each other. A malformed item is a 400 for the whole request.
 
 **URLs.** `POST /v1/documents` with `url` instead of `content` creates a
 document with no bytes; the extract stage fetches them once, keeps the

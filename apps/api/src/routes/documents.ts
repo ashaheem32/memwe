@@ -2,6 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import {
   assertFetchableUrl,
+  type BatchIngestItem,
+  BatchIngestRequest,
+  BatchIngestResponse,
   DocumentDetail,
   DocumentList,
   ErrorResponse,
@@ -49,19 +52,28 @@ const ingestRoute = createRoute({
 });
 
 documents.openapi(ingestRoute, async (c) => {
-  const p = c.get("principal");
-  const traceId = c.get("traceId");
-  const body = c.req.valid("json");
-  assertContainerAllowed(p, body.container);
+  const result = await ingestOne(c.get("principal"), c.req.valid("json"), c.get("traceId"));
+  return c.json(result, 202);
+});
 
+/** One document, by text or by address. Shared by the single and batch routes. */
+async function ingestOne(
+  p: Principal,
+  body: IngestRequest,
+  traceId: string,
+): Promise<IngestResponse> {
+  assertContainerAllowed(p, body.container);
   const hasContent = Boolean(body.content?.trim());
   if (hasContent === Boolean(body.url)) {
     throw new MemweError("invalid_request", "exactly one of content or url is required");
   }
-  if (body.url) {
-    const result = await ingestUrl(p, body.url, body, traceId);
-    return c.json(IngestResponse.parse(result), 202);
-  }
+  const result = body.url
+    ? await ingestUrl(p, body.url, body, traceId)
+    : await ingestContent(p, body, traceId);
+  return IngestResponse.parse(result);
+}
+
+async function ingestContent(p: Principal, body: IngestRequest, traceId: string) {
   const contentHash = createHash("sha256").update(body.content!).digest();
   const result = await withTenant(
     { orgId: p.orgId, container: body.container, containerScope: p.containerScope },
@@ -155,7 +167,43 @@ documents.openapi(ingestRoute, async (c) => {
     },
   );
 
-  return c.json(IngestResponse.parse(result), 202);
+  return result;
+}
+
+// ----------------------------------------------------------------- batch
+const batchRoute = createRoute({
+  method: "post",
+  path: "/batch",
+  tags: ["documents"],
+  summary: "Ingest many documents in one request",
+  description:
+    "Up to 100 items, each the shape of a single ingest. Items are processed in order and " +
+    "each answers on its own: a rejected item does not undo the ones before it, and results " +
+    "come back in the order sent. The request is 400 only when an item is malformed.",
+  request: { body: { content: { "application/json": { schema: BatchIngestRequest } } } },
+  responses: { 202: json(BatchIngestResponse, "Per-item results"), ...errors },
+});
+
+documents.openapi(batchRoute, async (c) => {
+  const p = c.get("principal");
+  const traceId = c.get("traceId");
+  const { items } = c.req.valid("json");
+  const results: BatchIngestItem[] = [];
+  for (const [index, item] of items.entries()) {
+    try {
+      // The trace threads through every job; the suffix says which item.
+      results.push({ index, result: await ingestOne(p, item, `${traceId}:${index}`) });
+    } catch (err) {
+      // A per-document refusal is an outcome; anything else is ours and aborts the batch.
+      if (!(err instanceof MemweError) || err.code === "internal") throw err;
+      results.push({ index, error: { code: err.code, message: err.message } });
+    }
+  }
+  const failed = results.filter((r) => r.error).length;
+  return c.json(
+    BatchIngestResponse.parse({ results, accepted: results.length - failed, failed }),
+    202,
+  );
 });
 
 /**
@@ -390,6 +438,7 @@ documents.openapi(getRoute, async (c) => {
         `select id::text, container, title, status::text, token_count, stage_error,
               failed_stage, duplicate_of::text, revision, status_changed_at, created_at, updated_at,
               metadata->'extraction' as extraction,
+              metadata->'diff' as diff,
               -- Position through the pipeline, computed here so a caller
               -- never has to know the stage names to draw a progress bar.
               case status

@@ -607,3 +607,150 @@ describe("url ingestion", () => {
     expect(row.blob_key).toBeNull();
   });
 });
+
+describe("revision diff path", () => {
+  const section = (name: string, word: string) =>
+    `## ${name}\n\n${`${word} sentence number one. `.repeat(50)}`;
+  const body = (b: string, extra = "") =>
+    `# Doc\n\n${section("A", "Alpha")}\n\n${section("B", b)}\n\n${section("C", "Gamma")}${extra}`;
+  const rows = (id: string) =>
+    pool.query<{
+      id: string;
+      ord: number;
+      revision: number;
+      text: string;
+      embedded_at: Date | null;
+    }>(
+      "select id::text,ord,revision,text,embedded_at from chunks where document_id=$1 order by ord",
+      [id],
+    );
+
+  it("keeps unchanged chunk rows with their ids and vectors, and records what changed", async () => {
+    const d = await ingest(body("Beta"), "diff");
+    const first = await finish(d.id);
+    const before = (await rows(d.id)).rows;
+    expect(before.length).toBeGreaterThanOrEqual(3);
+    expect(first.metadata.diff).toEqual({
+      from: null,
+      to: 1,
+      kept: 0,
+      added: before.length,
+      removed: 0,
+      moved: 0,
+    });
+    // Revise: B rewritten, D appended, A and C untouched.
+    await ingest(body("Changed", `\n\n${section("D", "Delta")}`), "diff");
+    const second = await finish(d.id);
+    const after = (await rows(d.id)).rows;
+    const byText = new Map(before.map((r) => [r.text, r]));
+    const kept = after.filter((r) => byText.has(r.text));
+    const added = after.filter((r) => !byText.has(r.text));
+    expect(kept.length).toBe(before.length - 1);
+    expect(added.length).toBe(2);
+    for (const r of kept) {
+      const old = byText.get(r.text)!;
+      expect(r.id).toBe(old.id);
+      expect(r.embedded_at?.getTime()).toBe(old.embedded_at?.getTime());
+      expect(r.revision).toBe(2);
+    }
+    expect(second.metadata.diff).toEqual({
+      from: 1,
+      to: 2,
+      kept: before.length - 1,
+      added: 2,
+      removed: 1,
+      moved: 0,
+    });
+    // Exactly the new revision's rows are visible to the app, nothing stale.
+    const visible = await withTenant({ orgId: ORG, container: CONTAINER }, (c) =>
+      c.query("select count(*)::int n from chunks where document_id=$1", [d.id]),
+    );
+    expect(visible.rows[0].n).toBe(after.length);
+    const detail = (await (await app.request(`/v1/documents/${d.id}`)).json()) as {
+      diff: unknown;
+    };
+    expect(detail.diff).toEqual(second.metadata.diff);
+  });
+
+  it("moves a chunk whose position changed without touching its vector", async () => {
+    const d = await ingest(body("Beta"), "move");
+    await finish(d.id);
+    const before = (await rows(d.id)).rows;
+    // Swap B and C: same chunks, different order.
+    await ingest(
+      `# Doc\n\n${section("A", "Alpha")}\n\n${section("C", "Gamma")}\n\n${section("B", "Beta")}`,
+      "move",
+    );
+    const doc = await finish(d.id);
+    const after = (await rows(d.id)).rows;
+    expect(new Set(after.map((r) => r.id))).toEqual(new Set(before.map((r) => r.id)));
+    expect(doc.metadata.diff).toMatchObject({
+      from: 1,
+      to: 2,
+      added: 0,
+      removed: 0,
+      kept: before.length,
+    });
+    expect(doc.metadata.diff.moved).toBeGreaterThanOrEqual(2);
+    expect(after.map((r) => r.ord)).toEqual(after.map((_, i) => i));
+  });
+});
+
+describe("batch ingest", () => {
+  it("answers per item, in order, dedupes within the batch, and isolates failures", async () => {
+    state.scope = CONTAINER; // a prefix: this container is allowed, others are not
+    const r = await post(
+      {
+        items: [
+          { container: CONTAINER, content: "batch one" },
+          { container: CONTAINER, content: "batch one" },
+          { container: "other_container", content: "not mine" },
+          { container: CONTAINER, content: "both", url: "https://example.com/" },
+          { container: CONTAINER, url: "http://169.254.169.254/latest/meta-data/" },
+          { container: CONTAINER, content: "batch two", customId: "b2" },
+        ],
+      },
+      "/v1/documents/batch",
+    );
+    expect(r.status).toBe(202);
+    const out = (await r.json()) as {
+      results: Array<{
+        index: number;
+        result?: { id: string; deduped: boolean; revision: number };
+        error?: { code: string };
+      }>;
+      accepted: number;
+      failed: number;
+    };
+    expect(out.results.map((x) => x.index)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(out.results[0]!.result).toMatchObject({ deduped: false, revision: 1 });
+    expect(out.results[1]!.result).toMatchObject({ id: out.results[0]!.result!.id, deduped: true });
+    expect(out.results[2]!.error?.code).toBe("forbidden");
+    expect(out.results[3]!.error?.code).toBe("invalid_request");
+    expect(out.results[4]!.error?.code).toBe("invalid_request");
+    expect(out.results[5]!.result).toMatchObject({ deduped: false, revision: 1 });
+    expect(out).toMatchObject({ accepted: 3, failed: 3 });
+    await finish(out.results[0]!.result!.id);
+    await finish(out.results[5]!.result!.id);
+    // The trace says which item a job came from.
+    const jobs = await pool.query(
+      "select payload->>'traceId' t from jobs where payload->>'documentId'=$1 limit 1",
+      [out.results[5]!.result!.id],
+    );
+    expect(jobs.rows[0].t).toMatch(/:5$/);
+  });
+
+  it("rejects a malformed envelope as a whole, creating nothing", async () => {
+    for (const items of [
+      [],
+      Array.from({ length: 101 }, (_, i) => ({ container: CONTAINER, content: `n${i}` })),
+      [{ container: "bad container!", content: "x" }],
+    ]) {
+      expect((await post({ items }, "/v1/documents/batch")).status).toBe(400);
+    }
+    expect(
+      (await pool.query("select count(*)::int n from documents where container=$1", [CONTAINER]))
+        .rows[0].n,
+    ).toBe(0);
+  });
+});

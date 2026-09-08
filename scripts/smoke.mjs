@@ -53,7 +53,12 @@ const spec = await fetch(`${API}/openapi.json`)
 if (!spec) fail("no /openapi.json");
 else {
   const paths = Object.keys(spec.paths ?? {});
-  const want = ["/v1/documents", "/v1/documents/{id}", "/v1/documents/upload"];
+  const want = [
+    "/v1/documents",
+    "/v1/documents/{id}",
+    "/v1/documents/upload",
+    "/v1/documents/batch",
+  ];
   const missing = want.filter((p) => !paths.includes(p));
   spec.openapi?.startsWith("3.1")
     ? ok(`openapi ${spec.openapi} served, ${paths.length} paths`)
@@ -97,6 +102,35 @@ dupe.deduped === true && dupe.id === id
   ? ok("worker drove it to done")
   : fail("pipeline did not complete — is `pnpm dev:worker` running?");
 
+// ---- batch ------------------------------------------------------------
+{
+  const batch = await fetch(`${API}/v1/documents/batch`, {
+    method: "POST",
+    headers: H,
+    body: JSON.stringify({
+      items: [
+        body, // already ingested above: dedupes
+        { container: C, content: `batch ${Date.now()}` },
+        { container: C, content: "x", url: "https://example.com/" }, // per-item error
+      ],
+    }),
+  });
+  const out = await batch.json();
+  batch.status === 202 &&
+  out.results?.[0]?.result?.deduped === true &&
+  out.results?.[1]?.result?.deduped === false &&
+  out.results?.[2]?.error?.code === "invalid_request" &&
+  out.accepted === 2 &&
+  out.failed === 1
+    ? ok("batch answered per item: dedupe, new, rejected")
+    : fail(`batch: ${batch.status} ${JSON.stringify(out)}`);
+  if (out.results?.[1]?.result?.id) {
+    (await poll(out.results[1].result.id)) === "done"
+      ? ok("batch item drove to done")
+      : fail("batch item did not complete");
+  }
+}
+
 // ---- revision by customId ---------------------------------------------
 {
   const cid = `smoke-rev-${Date.now()}`;
@@ -137,6 +171,15 @@ dupe.deduped === true && dupe.id === id
   (await poll(first.id)) === "done"
     ? ok("revision reprocessed to done")
     : fail("revision did not complete");
+  // The revision changed one line of a two-part document; the diff says so.
+  const revised = await fetch(`${API}/v1/documents/${first.id}`, { headers: H }).then((r) =>
+    r.json(),
+  );
+  revised.diff?.from === 1 && revised.diff?.to === 2 && revised.diff?.added >= 1
+    ? ok(
+        `revision diff recorded (${revised.diff.kept} kept, ${revised.diff.added} added, ${revised.diff.removed} removed)`,
+      )
+    : fail(`revision diff: ${JSON.stringify(revised.diff)}`);
 }
 
 // ---- upload through MinIO --------------------------------------------
