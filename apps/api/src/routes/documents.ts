@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import {
+  assertFetchableUrl,
   DocumentDetail,
   DocumentList,
   ErrorResponse,
@@ -40,7 +41,8 @@ const ingestRoute = createRoute({
   tags: ["documents"],
   summary: "Ingest a document",
   description:
-    "Accepts text or a URL, dedupes by content hash, and returns 202 immediately. " +
+    "Accepts text or a URL and returns 202 immediately. Text is deduped by content hash; " +
+    "a URL is deduped by address now and by fetched content once the worker has it. " +
     "The pipeline runs asynchronously; poll the document for status.",
   request: { body: { content: { "application/json": { schema: IngestRequest } } } },
   responses: { 202: json(IngestResponse, "Accepted for processing"), ...errors },
@@ -52,13 +54,15 @@ documents.openapi(ingestRoute, async (c) => {
   const body = c.req.valid("json");
   assertContainerAllowed(p, body.container);
 
-  if (!body.content?.trim() || body.url) {
-    throw new MemweError(
-      "invalid_request",
-      "non-empty content is required; URL ingestion is not implemented",
-    );
+  const hasContent = Boolean(body.content?.trim());
+  if (hasContent === Boolean(body.url)) {
+    throw new MemweError("invalid_request", "exactly one of content or url is required");
   }
-  const contentHash = createHash("sha256").update(body.content).digest();
+  if (body.url) {
+    const result = await ingestUrl(p, body.url, body, traceId);
+    return c.json(IngestResponse.parse(result), 202);
+  }
+  const contentHash = createHash("sha256").update(body.content!).digest();
   const result = await withTenant(
     { orgId: p.orgId, container: body.container, containerScope: p.containerScope },
     async (client) => {
@@ -153,6 +157,89 @@ documents.openapi(ingestRoute, async (c) => {
 
   return c.json(IngestResponse.parse(result), 202);
 });
+
+/**
+ * A URL has no bytes yet, so it cannot be deduped by hash here; the worker
+ * does that once it has fetched them. What can be decided now: the same
+ * address in the same container is the same document unless a customId
+ * says otherwise, and an address we would never fetch is a 400, not a
+ * document that fails later.
+ */
+async function ingestUrl(
+  p: Principal,
+  url: string,
+  body: Pick<IngestRequest, "container" | "customId" | "title" | "metadata">,
+  traceId: string,
+) {
+  const href = assertFetchableUrl(url, {
+    allowPrivate: process.env["URL_ALLOW_PRIVATE"] === "true",
+  }).href;
+  return withTenant(
+    { orgId: p.orgId, container: body.container, containerScope: p.containerScope },
+    async (client) => {
+      await lockIngestion(client, p.orgId, body.container);
+      const prior = body.customId
+        ? (
+            await client.query<{ id: string; revision: number }>(
+              `select id::text,revision from documents where custom_id=$1 and org_id=$2 and container=$3 for update`,
+              [body.customId, p.orgId, body.container],
+            )
+          ).rows[0]
+        : (
+            await client.query<{ id: string; status: string; revision: number }>(
+              `select id::text,status::text,revision from documents
+              where org_id=$1 and container=$2 and source='url' and source_uri=$3 and custom_id is null
+              order by created_at,id limit 1`,
+              [p.orgId, body.container, href],
+            )
+          ).rows[0];
+      if (prior && !body.customId && "status" in prior) {
+        return {
+          id: prior.id,
+          status: prior.status,
+          revision: prior.revision,
+          deduped: true,
+          revised: false,
+        };
+      }
+      const id = prior?.id ?? randomUUID();
+      const revision = (prior?.revision ?? 0) + 1;
+      // Unique per document revision until the fetched bytes replace it.
+      const placeholder = createHash("sha256").update(`url\0${href}\0${id}\0${revision}`).digest();
+      if (prior) {
+        await client.query(
+          `update documents set source='url',source_uri=$2,source_content=null,markdown=null,blob_key=null,
+          upload_pending_key=null,content_hash=$3,mime=null,title=$4,metadata=$5,span_map=null,duplicate_of=null,
+          revision=$6,status='queued',stage_error=null,failed_stage=null,token_count=null,
+          status_changed_at=now(),updated_at=now() where id=$1`,
+          [id, href, placeholder, body.title ?? null, body.metadata ?? {}, revision],
+        );
+      } else {
+        await client.query(
+          `insert into documents (id,org_id,container,custom_id,title,source_uri,content_hash,source,metadata,status)
+          values ($1,$2,$3,$4,$5,$6,$7,'url',$8,'queued')`,
+          [
+            id,
+            p.orgId,
+            body.container,
+            body.customId ?? null,
+            body.title ?? null,
+            href,
+            placeholder,
+            body.metadata ?? {},
+          ],
+        );
+      }
+      await enqueue(client, {
+        type: "document.accept",
+        payload: { orgId: p.orgId, container: body.container, traceId, documentId: id, revision },
+        traceId,
+        dedupeKey: `document.accept:${id}:${revision}`,
+      });
+      return { id, status: "queued", deduped: false, revision, revised: Boolean(prior) };
+    },
+  );
+}
 
 // ---------------------------------------------------------------- upload
 const uploadRoute = createRoute({

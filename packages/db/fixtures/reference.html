@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>frobnicate — Example Reference</title></head>
+<body>
+  <nav><a href="/">Home</a> <a href="/ref">Reference</a> <a href="/ref/defrob">Next</a></nav>
+  <div class="refentry">
+    <div class="titlepage"></div>
+    <div class="namediv">
+      <h2>frobnicate</h2>
+      <p>frobnicate, frob — adjust the frobnication level of a widget</p>
+    </div>
+    <div class="synopsis">
+      <h2>Synopsis</h2>
+      <pre>frobnicate [ <a href="#opt-level">--level</a> <em>n</em> ] [ <a href="#opt-dry">--dry-run</a> ] <em>widget</em> [, ...]</pre>
+    </div>
+    <div class="sect">
+      <h2>Description</h2>
+      <p>Step 1: the requested level is located in the registry, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 2: the requested level is validated against the declared range, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 3: the requested level is written to the widget, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 4: the requested level is recorded for reversal, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 5: the requested level is reported to observers, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 6: the requested level is summarised on standard output, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 7: the requested level is checked against the audit policy, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 8: the requested level is mirrored to the standby registry, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 9: the requested level is compared with the previous level, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 10: the requested level is annotated with the operator's reason, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 11: the requested level is queued for the nightly consolidation, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+      <p>Step 12: the requested level is confirmed by the widget itself, and if this step cannot complete for a reason the operator can act on, the command stops here, reports which widget was affected, explains what was expected, and exits with a status that distinguishes a configuration problem from a transient one, so that a retry is only attempted when it can succeed.</p>
+    </div>
+    <div class="sect">
+      <h2>Options</h2>
+      <p>--level n — Sets the target frobnication level for every widget named on the command line. This option may be given at most once; giving it twice is reported as an error rather than silently taking the last value, because in batch scripts the second occurrence is almost always a copy-and-paste mistake rather than an intention.</p>
+      <p>--dry-run — Reports what would change without changing anything, which is the safe way to preview a batch. This option may be given at most once; giving it twice is reported as an error rather than silently taking the last value, because in batch scripts the second occurrence is almost always a copy-and-paste mistake rather than an intention.</p>
+      <p>--override — Skips the range check and marks the widget as overridden until the override is cleared. This option may be given at most once; giving it twice is reported as an error rather than silently taking the last value, because in batch scripts the second occurrence is almost always a copy-and-paste mistake rather than an intention.</p>
+      <p>--reason text — Records why the change was made, and is required when a change crosses a range boundary. This option may be given at most once; giving it twice is reported as an error rather than silently taking the last value, because in batch scripts the second occurrence is almost always a copy-and-paste mistake rather than an intention.</p>
+    </div>
+  </div>
+  <footer><p>Prev: defrob · Up · Next: unfrob · Submit a correction</p></footer>
+</body>
+</html>

@@ -27,6 +27,7 @@ pnpm install
 cp .env.example .env
 pnpm up          # docker compose + wait + migrate
 pnpm seed        # 2 orgs, 7 docs, 1 dev API key
+pnpm --filter @memwe/worker exec playwright install chromium   # once; URL ingestion renders JS pages with it
 
 pnpm dev:api     # terminal 1
 pnpm dev:worker  # terminal 2
@@ -95,6 +96,24 @@ returns a `revision`, and `/upload/{id}/complete?revision=N` is refused with
 sealed key, so a PUT URL that is reused after completion cannot change what
 the worker reads.
 
+**URLs.** `POST /v1/documents` with `url` instead of `content` creates a
+document with no bytes; the extract stage fetches them once, keeps the
+snapshot in blob storage under that revision, and from then on the document
+behaves like an upload. Retries, reprocessing and dedupe read the snapshot,
+never the site. The fetch is plain HTTP first; when the page is a JavaScript
+shell, or `URL_FETCH_MODE=headless`, it is rendered in a headless Chromium
+with images, media and fonts blocked. A URL that answers with a PDF or plain
+text goes to that extractor. HTML goes through Readability to drop
+navigation, banners and footers, then to a serializer that writes block
+structure (headings, lists, code, tables, quotes) as markdown and nothing
+inline, so every line still maps to a line of the page text exactly. Private,
+loopback, link-local and cloud-metadata addresses are refused at the API and
+again in the worker on every redirect hop and every request the browser
+makes; `URL_ALLOW_PRIVATE=true` is for local development only. The same
+address in a container is the same document unless a `customId` makes it a
+revision; identical bytes from two addresses dedupe by hash. What the fetch
+did is recorded under `metadata.fetch`.
+
 **Handoffs.** A stage commits its writes, the status change, and the next job
 in one transaction. Queue completion, heartbeat, retry, and kill are fenced by
 the worker's lease; an old worker cannot act on its replacement's job. A job
@@ -102,7 +121,9 @@ the reaper exhausts marks the document `failed`.
 
 **Offsets.** `NormalizedDoc.spanMap` offsets are UTF-16 code units into the
 decoded source text (BOM included), or into the page text for PDFs, which
-also carry `page`. A resolved `SourceLocation` reports `exact: false` when
+also carry `page`. For HTML the source is the page text: the readable text,
+one block per line, derived deterministically from the stored snapshot. A resolved
+`SourceLocation` reports `exact: false` when
 normalization rewrote the range (ligatures, de-hyphenation, OCR), in which
 case the offsets are the enclosing line rather than the exact characters. A
 span map past its size limit is truncated, never extrapolated. Chunk rows

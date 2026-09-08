@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { type Job, MemweError } from "@memwe/contracts";
 import { close, pool, withTenant } from "@memwe/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +32,9 @@ vi.mock("@memwe/storage", () => ({
   objectExists: async (key: string) => state.blobs.has(key),
   copyObject: async (from: string, to: string) => {
     state.blobs.set(to, Buffer.from(state.blobs.get(from)!));
+  },
+  putObject: async (key: string, body: Buffer | string) => {
+    state.blobs.set(key, Buffer.from(body));
   },
 }));
 
@@ -459,5 +466,144 @@ describe("contextual chunk headers", () => {
     const rows = (await chunkRows(d.id)).rows;
     expect(rows.every((x) => x.generated_context === null && x.context_header !== null)).toBe(true);
     expect(doc.metadata.context).toBeUndefined();
+  });
+});
+
+describe("url ingestion", () => {
+  let server: Server;
+  let base: string;
+  beforeAll(async () => {
+    const article = await readFile(join("packages", "db", "fixtures", "article.html"));
+    const pdf = await readFile(join("packages", "db", "fixtures", "simple.pdf"));
+    server = createServer((req, res) => {
+      const send = (status: number, type: string, body: Buffer | string) => {
+        res.writeHead(status, { "content-type": type });
+        res.end(body);
+      };
+      if (req.url === "/article" || req.url === "/same")
+        return send(200, "text/html; charset=utf-8", article);
+      if (req.url === "/pdf") return send(200, "application/pdf", pdf);
+      return send(404, "text/plain", "no");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+  beforeEach(() => {
+    vi.stubEnv("URL_ALLOW_PRIVATE", "true");
+    vi.stubEnv("URL_FETCH_MODE", "http");
+  });
+  const doc = async (id: string) =>
+    (await pool.query("select * from documents where id=$1", [id])).rows[0];
+
+  it("rejects what it would never fetch, and content together with url, at the API", async () => {
+    vi.stubEnv("URL_ALLOW_PRIVATE", "false");
+    for (const body of [
+      { container: CONTAINER, url: `${base}/article` },
+      { container: CONTAINER, url: "http://169.254.169.254/latest/meta-data/" },
+      { container: CONTAINER, url: "file:///etc/passwd" },
+      { container: CONTAINER, url: "https://example.com/", content: "both" },
+      { container: CONTAINER },
+    ]) {
+      const r = await post(body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+    }
+    expect(
+      (await pool.query("select count(*)::int n from documents where container=$1", [CONTAINER]))
+        .rows[0].n,
+    ).toBe(0);
+  });
+
+  it("fetches, snapshots, extracts the article, and dedupes the same address", async () => {
+    const r = await post({ container: CONTAINER, url: `${base}/article` });
+    expect(r.status).toBe(202);
+    const first = (await r.json()) as { id: string; status: string; deduped: boolean };
+    expect(first).toMatchObject({ status: "queued", deduped: false });
+    const row = await finish(first.id);
+    expect(row.source).toBe("url");
+    expect(row.source_uri).toBe(`${base}/article`);
+    expect(row.mime).toBe("text/html");
+    expect(row.blob_key).toMatch(new RegExp(`^org/${ORG}/doc/${first.id}/1/fetch/`));
+    expect(state.blobs.get(row.blob_key)?.toString()).toContain("<title>Why Postgres");
+    expect(row.title).toBe("Why Postgres Row Locks Are Enough");
+    expect(row.markdown).toMatch(/^# Why Postgres Row Locks Are Enough\n\n/);
+    expect(row.markdown).not.toContain("Pricing");
+    expect(row.metadata.fetch).toMatchObject({
+      status: 200,
+      via: "http",
+      contentType: "text/html",
+      charset: "utf-8",
+      redirects: 0,
+      finalUrl: `${base}/article`,
+    });
+    expect(row.metadata.extraction).toMatchObject({ format: "html", readable: true });
+    expect(row.token_count).toBeGreaterThan(100);
+    // The same address again is the same document.
+    const again = (await (await post({ container: CONTAINER, url: `${base}/article` })).json()) as {
+      id: string;
+      deduped: boolean;
+    };
+    expect(again).toMatchObject({ id: first.id, deduped: true });
+    // With a customId it is a revision: fetched again under a new snapshot.
+    const named = (await (
+      await post({ container: CONTAINER, url: `${base}/article`, customId: "page" })
+    ).json()) as { id: string };
+    expect(named.id).not.toBe(first.id);
+    await finish(named.id);
+    const revised = (await (
+      await post({ container: CONTAINER, url: `${base}/article`, customId: "page" })
+    ).json()) as {
+      id: string;
+      revision: number;
+      revised: boolean;
+    };
+    expect(revised).toMatchObject({ id: named.id, revision: 2, revised: true });
+    const after = await finish(named.id);
+    expect(after.blob_key).toMatch(/\/2\/fetch\//);
+    expect(after.revision).toBe(2);
+  });
+
+  it("dedupes identical content fetched from a different address by hash", async () => {
+    const a = (await (await post({ container: CONTAINER, url: `${base}/article` })).json()) as {
+      id: string;
+    };
+    await finish(a.id);
+    const b = (await (await post({ container: CONTAINER, url: `${base}/same` })).json()) as {
+      id: string;
+    };
+    expect(b.id).not.toBe(a.id);
+    const row = await finish(b.id);
+    expect(row.duplicate_of).toBe(a.id);
+    expect(row.metadata.extraction.reusedFrom).toBe(a.id);
+    expect(row.markdown).toMatch(/^# Why Postgres/);
+  });
+
+  it("sends a URL that answers with a PDF through the PDF extractor", async () => {
+    const r = (await (await post({ container: CONTAINER, url: `${base}/pdf` })).json()) as {
+      id: string;
+    };
+    const row = await finish(r.id);
+    expect(row.mime).toBe("application/pdf");
+    expect(row.metadata.fetch.contentType).toBe("application/pdf");
+    expect(row.metadata.extraction.format).toBe("pdf");
+    expect(row.token_count).toBeGreaterThan(0);
+  });
+
+  it("fails the document, with the reason, when the address does not answer", async () => {
+    const r = (await (await post({ container: CONTAINER, url: `${base}/gone` })).json()) as {
+      id: string;
+    };
+    for (let i = 0; i < 10; i++) {
+      const j = await claimFor(r.id);
+      if (!j) break;
+      await runner.run(j);
+    }
+    const row = await doc(r.id);
+    expect(row.status).toBe("failed");
+    expect(row.failed_stage).toBe("document.extract");
+    expect(row.stage_error).toMatch(/404/);
+    expect(row.blob_key).toBeNull();
   });
 });

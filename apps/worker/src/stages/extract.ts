@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type Acl,
   DocumentJobPayload,
@@ -6,9 +6,10 @@ import {
   MemweError,
   type TrustTier,
 } from "@memwe/contracts";
-import { getObject } from "@memwe/storage";
+import { blobKey, getObject, putObject } from "@memwe/storage";
 import { tokens } from "../chunk/tokens.js";
 import { extract } from "../extract/index.js";
+import { fetchConfig, fetchUrl } from "../fetch/index.js";
 import { documentTx } from "./guard.js";
 import type { StageContext, StageResult } from "./index.js";
 
@@ -16,11 +17,13 @@ type Row = {
   blob_key: string | null;
   source_content: string | null;
   markdown: string | null;
+  source: string;
   source_uri: string | null;
   mime: string | null;
   title: string | null;
   acl: Acl;
   trust: TrustTier;
+  metadata: { fetch?: { charset?: string | null } };
 };
 
 export async function extractStage(job: Job, ctx: StageContext): Promise<StageResult> {
@@ -30,13 +33,15 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<StageRe
     async (c) =>
       (
         await c.query<Row>(
-          `select blob_key,source_content,markdown,source_uri,mime,title,acl,trust from documents where id=$1`,
+          `select blob_key,source_content,markdown,source,source_uri,mime,title,acl,trust,metadata
+             from documents where id=$1`,
           [p.documentId],
         )
       ).rows[0]!,
   );
   let bytes: Buffer;
   if (row.blob_key) bytes = await getObject(row.blob_key);
+  else if (row.source === "url" && row.source_uri) bytes = await fetchSource(job, row, ctx);
   else if (row.source_content !== null || row.markdown !== null)
     bytes = Buffer.from(row.source_content ?? row.markdown!, "utf8");
   else throw new MemweError("unsupported_content", "document has no content");
@@ -100,6 +105,7 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<StageRe
     {
       bytes,
       declaredMime: row.mime,
+      charset: row.metadata.fetch?.charset ?? null,
       filename: row.title,
       sourceUri: row.source_uri,
       acl: row.acl,
@@ -123,4 +129,43 @@ export async function extractStage(job: Job, ctx: StageContext): Promise<StageRe
     );
   });
   ctx.log.info("extracted", { documentId: p.documentId, ...stats });
+}
+
+/**
+ * A URL document has no bytes until here. Fetch them once, keep the
+ * snapshot in blob storage under this revision, and record how the fetch
+ * went on the row. From then on the document is an upload: retries,
+ * dedupe by hash, and reprocessing all read the snapshot, never the site.
+ */
+async function fetchSource(job: Job, row: Row, ctx: StageContext): Promise<Buffer> {
+  const p = DocumentJobPayload.parse(job.payload);
+  // Check before spending network time, then fence the write again after.
+  await documentTx(job, async () => {});
+  const fetched = await fetchUrl(row.source_uri!, fetchConfig(), ctx.log);
+  const key = `${blobKey(p.orgId, p.documentId)}/${p.revision}/fetch/${randomUUID()}`;
+  await putObject(key, fetched.bytes, fetched.contentType ?? undefined);
+  const stats = {
+    finalUrl: fetched.finalUrl,
+    status: fetched.status,
+    via: fetched.via,
+    rendered: fetched.rendered ?? null,
+    redirects: fetched.redirects,
+    contentType: fetched.contentType,
+    charset: fetched.charset,
+    bytes: fetched.bytes.byteLength,
+    elapsedMs: fetched.elapsedMs,
+    fetchedAt: new Date().toISOString(),
+  };
+  await documentTx(job, async (c) => {
+    await c.query(
+      `update documents set blob_key=$2,mime=$3,metadata=metadata||jsonb_build_object('fetch',$4::jsonb),
+        updated_at=now() where id=$1`,
+      [p.documentId, key, fetched.contentType, JSON.stringify(stats)],
+    );
+  });
+  row.blob_key = key;
+  row.mime = fetched.contentType;
+  row.metadata = { ...row.metadata, fetch: { charset: fetched.charset } };
+  ctx.log.info("fetched", { documentId: p.documentId, ...stats });
+  return fetched.bytes;
 }

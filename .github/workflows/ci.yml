@@ -32,6 +32,13 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Headless Chromium for the URL fetcher tests. Cached on the lockfile,
+      # which pins the Playwright version and so the browser build.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm --filter @memwe/worker exec playwright install --with-deps chromium
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm migrate
@@ -43,3 +50,4 @@ jobs:
           # exists. Fork PRs have no secrets and skip it.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RUN_LIVE_MODEL_TESTS: ${{ secrets.ANTHROPIC_API_KEY != '' && '1' || '' }}
+          RUN_BROWSER_TESTS: "1"
