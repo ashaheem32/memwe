@@ -2,6 +2,7 @@ import type { Job, JobType } from "@memwe/contracts";
 import type { Logger } from "../log.js";
 import { accept } from "./accept.js";
 import { chunkStage } from "./chunk.js";
+import { contextualizeStage } from "./contextualize.js";
 import { embedStage } from "./embed.js";
 import { extractStage } from "./extract.js";
 
@@ -12,7 +13,7 @@ export type StageContext = { log: Logger };
  * stage discovers there is nothing left to do, such as bytes we already
  * have under another id.
  */
-export type StageResult = void | { halt: true; reason: string };
+export type StageResult = undefined | { halt: true; reason: string } | { deferMs: number };
 export type Stage = (job: Job, ctx: StageContext) => Promise<StageResult>;
 
 /**
@@ -24,6 +25,7 @@ export const STAGES: Partial<Record<JobType, Stage>> = {
   "document.accept": accept,
   "document.extract": extractStage,
   "document.chunk": chunkStage,
+  "document.contextualize": contextualizeStage,
   "document.embed": embedStage,
   // Next: document.index
   // Sprint 3: memory.distill, memory.reconcile

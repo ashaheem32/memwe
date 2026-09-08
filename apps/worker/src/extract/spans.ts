@@ -20,9 +20,22 @@ export class SpanMap {
    * emitted precisely when the offset delta changes. That invariant is what
    * lets `resolveSpan` interpolate instead of guessing.
    */
-  mark(md: number, src: number, loc?: { page?: number; bbox?: SpanMapEntry["bbox"] }): void {
+  mark(
+    md: number,
+    src: number,
+    loc?: {
+      page?: number;
+      bbox?: SpanMapEntry["bbox"];
+      mdEnd?: number;
+      srcEnd?: number;
+      exact?: boolean;
+    },
+  ): void {
     if (this.entries.length >= MAX_ENTRIES) {
-      this.truncatedAt ??= md;
+      if (this.truncatedAt === null) {
+        this.truncatedAt = md;
+        this.entries.push({ md, src, mdEnd: md, srcEnd: src, exact: false });
+      }
       return;
     }
     const delta = src - md;
@@ -31,11 +44,20 @@ export class SpanMap {
     const bbox = loc?.bbox;
     // Only a change in delta, page, or geometry carries information.
     const samePlace = this.lastDelta === delta && page === prev?.page && bbox === undefined;
-    if (samePlace) return;
+    if (
+      samePlace &&
+      loc?.mdEnd === undefined &&
+      loc?.exact === undefined &&
+      prev?.mdEnd === undefined
+    )
+      return;
     this.lastDelta = delta;
     const entry: SpanMapEntry = { md, src };
     if (page !== undefined) entry.page = page;
     if (bbox !== undefined) entry.bbox = bbox;
+    if (loc?.mdEnd !== undefined) entry.mdEnd = loc.mdEnd;
+    if (loc?.srcEnd !== undefined) entry.srcEnd = loc.srcEnd;
+    if (loc?.exact !== undefined) entry.exact = loc.exact;
     this.entries.push(entry);
   }
 
@@ -93,17 +115,20 @@ export function resolveSpan(
   entries: readonly SpanMapEntry[],
   mdStart: number,
   mdEnd: number,
-  opts: { markdownLength?: number } = {},
+  opts: { markdownLength?: number; truncatedAt?: number | null } = {},
 ): SourceLocation[] {
   if (mdEnd <= mdStart || entries.length === 0) return [];
-  const end = opts.markdownLength ?? Number.MAX_SAFE_INTEGER;
+  const end = Math.min(
+    opts.markdownLength ?? Number.MAX_SAFE_INTEGER,
+    opts.truncatedAt ?? Number.MAX_SAFE_INTEGER,
+  );
 
   const out: SourceLocation[] = [];
   for (let i = 0; i < entries.length; i++) {
     const seg = entries[i];
     if (!seg) continue;
     const segStart = seg.md;
-    const segEnd = entries[i + 1]?.md ?? end;
+    const segEnd = Math.min(seg.mdEnd ?? Number.MAX_SAFE_INTEGER, entries[i + 1]?.md ?? end, end);
     if (segEnd <= mdStart) continue;
     if (segStart >= mdEnd) break;
 
@@ -114,9 +139,9 @@ export function resolveSpan(
     const delta = seg.src - seg.md;
 
     const loc: SourceLocation = {
-      srcStart: from + delta,
-      srcEnd: to + delta,
-      exact: true,
+      srcStart: seg.exact === false ? seg.src : from + delta,
+      srcEnd: seg.exact === false ? (seg.srcEnd ?? seg.src) : to + delta,
+      exact: seg.exact !== false,
     };
     if (seg.page !== undefined) loc.page = seg.page;
     if (seg.bbox !== undefined) loc.bbox = seg.bbox;
@@ -131,6 +156,8 @@ export function resolveSpan(
     if (
       prev &&
       prev.page === loc.page &&
+      prev.exact &&
+      loc.exact &&
       prev.bbox === undefined &&
       loc.bbox === undefined &&
       prev.srcEnd === loc.srcStart

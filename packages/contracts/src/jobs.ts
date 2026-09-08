@@ -21,6 +21,7 @@ export const JobType = z.enum([
   "document.accept", // stage 01 — dedupe, hash, admit
   "document.extract", // stage 02 — bytes/URL -> NormalizedDoc
   "document.chunk", // stage 04
+  "document.contextualize", // stage 05 — model-written context per chunk
   "document.embed", // stage 06
   "document.index", // stage 06
   "memory.distill", // stage 07  (Sprint 3)
@@ -33,6 +34,7 @@ export type JobType = z.infer<typeof JobType>;
 
 export const DocumentJobPayload = JobEnvelope.extend({
   documentId: z.guid(),
+  revision: z.number().int().positive().default(1),
 });
 export type DocumentJobPayload = z.infer<typeof DocumentJobPayload>;
 
@@ -46,6 +48,7 @@ export const JOB_PAYLOAD: Record<JobType, z.ZodTypeAny> = {
   "document.accept": DocumentJobPayload,
   "document.extract": DocumentJobPayload,
   "document.chunk": DocumentJobPayload,
+  "document.contextualize": DocumentJobPayload,
   "document.embed": DocumentJobPayload,
   "document.index": DocumentJobPayload,
   "memory.distill": DocumentJobPayload,
@@ -62,4 +65,5 @@ export type Job<P = unknown> = {
   attempts: number;
   maxAttempts: number;
   traceId: string;
+  lockedBy?: string;
 };

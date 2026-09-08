@@ -37,3 +37,9 @@ jobs:
       - run: pnpm migrate
       - run: pnpm seed
       - run: pnpm test
+        env:
+          # The live prompt-cache assertion (tests/context-live.test.ts)
+          # spends a few cents per run, so it runs only where the secret
+          # exists. Fork PRs have no secrets and skip it.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_LIVE_MODEL_TESTS: ${{ secrets.ANTHROPIC_API_KEY != '' && '1' || '' }}

@@ -19,6 +19,7 @@ export interface EmbeddingProvider {
   /** Provider's own per-request caps. Batching respects both. */
   readonly maxBatchSize: number;
   readonly maxBatchTokens: number;
+  readonly maxInputTokens?: number;
   /** True when a call costs money. Gates it behind an explicit key. */
   readonly metered: boolean;
   embed(inputs: EmbedInput[]): Promise<number[][]>;
@@ -26,11 +27,15 @@ export interface EmbeddingProvider {
 
 export function assertDimensions(vectors: number[][], expected: number, provider: string): void {
   for (const v of vectors) {
-    if (v.length !== expected) {
+    if (
+      !Array.isArray(v) ||
+      v.length !== expected ||
+      v.some((n) => typeof n !== "number" || !Number.isFinite(n))
+    ) {
       throw new MemweError(
         "internal",
-        `${provider} returned ${v.length} dimensions, schema expects ${expected}`,
-        { provider, got: v.length, expected },
+        `${provider} returned ${v?.length} dimensions, schema expects ${expected}`,
+        { provider, got: v?.length, expected },
       );
     }
   }

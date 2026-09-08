@@ -41,6 +41,7 @@ export type NormalizeOptions = {
    * paragraph separator; more is just vertical space from a PDF layout.
    */
   maxBlankLines?: number;
+  authoredMarkdown?: boolean;
 };
 
 export function normalizeLine(line: string): string {
@@ -87,50 +88,45 @@ export function normalizeText(
     i = end + term;
   }
 
-  const out: string[] = [];
-  let mdLen = 0;
+  let out = "";
   let blankRun = 0;
   let pendingJoin = false;
-
+  let fence: { char: string; length: number } | null = null;
   for (let n = 0; n < lines.length; n++) {
-    const line = lines[n];
-    if (!line) continue;
-    let text = normalizeLine(line.text);
-
-    if (text.trim().length === 0) {
+    const line = lines[n]!;
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line.text);
+    const inCode = opts.authoredMarkdown && (fence !== null || marker !== null);
+    if (opts.authoredMarkdown && marker?.[1]) {
+      if (!fence) fence = { char: marker[1][0]!, length: marker[1].length };
+      else if (
+        marker[1][0] === fence.char &&
+        marker[1].length >= fence.length &&
+        !marker[2]?.trim()
+      )
+        fence = null;
+    }
+    let text = inCode ? line.text : normalizeLine(line.text);
+    if (opts.authoredMarkdown && !inCode && / {2,}$/.test(line.text)) text += "  ";
+    if (!inCode && !text.trim()) {
       blankRun++;
-      if (blankRun > maxBlankLines) continue; // dropped: source moves on, output does not
-      map.mark(mdLen, line.srcStart);
-      out.push("");
-      mdLen += 1;
-      continue;
-    }
-    blankRun = 0;
-
+      if (blankRun > maxBlankLines) continue;
+    } else blankRun = 0;
     let joinNext = false;
-    if (dehyphenate) {
-      const next = lines[n + 1]?.text ?? "";
-      if (isBrokenWord(text, next)) {
-        text = text.slice(0, -1); // drop the hyphen
-        joinNext = true;
-      }
+    if (dehyphenate && !inCode && isBrokenWord(text, lines[n + 1]?.text ?? "")) {
+      text = text.slice(0, -1);
+      joinNext = true;
     }
-
-    // A joined line's offsets are the enclosing line's, not exact — the
-    // resolver reports that rather than pretending to character precision.
-    map.mark(mdLen, line.srcStart);
-    if (pendingJoin) {
-      const prev = out.pop() ?? "";
-      out.push(prev + text.trimStart());
-      mdLen += text.trimStart().length;
-    } else {
-      out.push(text);
-      mdLen += text.length + 1;
-    }
+    if (pendingJoin) text = text.trimStart();
+    else if (n > 0 && out.length > 0) out += "\n";
+    const start = out.length;
+    out += text;
+    const exact = text === line.text && !pendingJoin && !joinNext;
+    map.mark(start, line.srcStart, {
+      mdEnd: out.length,
+      srcEnd: line.srcStart + line.text.length,
+      exact,
+    });
     pendingJoin = joinNext;
   }
-
-  // Trailing blank lines carry nothing.
-  while (out.length > 0 && (out[out.length - 1] ?? "").trim() === "") out.pop();
-  return out.join("\n");
+  return out.replace(/\n+$/, "");
 }

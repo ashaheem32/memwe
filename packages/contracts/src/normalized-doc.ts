@@ -15,13 +15,12 @@ import { ContainerTag } from "./tenant.js";
 export const SpanMapEntry = z.object({
   /** offset in the emitted markdown */
   md: z.number().int().nonnegative(),
-  /**
-   * Corresponding offset in the original source. Best effort: for text and
-   * markdown it is an exact byte-stream offset; for paginated formats it is
-   * an offset into the extracted text of that page, because a character
-   * offset into raw PDF bytes means nothing for provenance.
-   */
+  /** UTF-16 code-unit offset in decoded source (including a BOM), or PDF page text. */
   src: z.number().int().nonnegative(),
+  /** Explicit bounds; required for rewritten/synthetic segments. */
+  mdEnd: z.number().int().nonnegative().optional(),
+  srcEnd: z.number().int().nonnegative().optional(),
+  exact: z.boolean().optional(),
   /** 1-indexed source page, for formats that have pages. */
   page: z.number().int().positive().optional(),
   /** [x, y, w, h] in source units, when the format has geometry. */
@@ -74,7 +73,7 @@ export const NormalizedDoc = z.object({
   markdown: z.string(),
 
   /**
-   * Offsets back into the original bytes. Emit this even when it feels
+   * Offsets into the decoded original text in UTF-16 code units. Emit this even when it feels
    * pointless — provenance and time travel are nearly free if it exists
    * and a full reprocessing job if it doesn't.
    */
@@ -110,7 +109,7 @@ export const IngestRequest = z
     container: ContainerTag,
     content: z.string().max(1_000_000).optional(),
     url: z.url().optional(),
-    customId: z.string().max(255).optional(),
+    customId: z.string().min(1).max(255).optional(),
     title: z.string().max(500).optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
   })

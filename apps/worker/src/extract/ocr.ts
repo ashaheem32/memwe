@@ -14,7 +14,8 @@ export interface OcrProvider {
 }
 
 export class TesseractOcr implements OcrProvider {
-  private worker: Worker | null = null;
+  private worker: Promise<Worker> | null = null;
+  private pending: Promise<unknown> = Promise.resolve();
 
   /**
    * Loading the language data is expensive (tens of MB, once). Keeping one
@@ -22,19 +23,31 @@ export class TesseractOcr implements OcrProvider {
    * instead of a per-page one.
    */
   private async ready(): Promise<Worker> {
-    this.worker ??= await createWorker("eng");
+    this.worker ??= createWorker(
+      "eng",
+      1,
+      process.env.OCR_LANG_PATH ? { langPath: process.env.OCR_LANG_PATH, gzip: false } : {},
+    ).catch((err) => {
+      this.worker = null;
+      throw err;
+    });
     return this.worker;
   }
 
   async recognize(png: Buffer): Promise<OcrResult> {
-    const worker = await this.ready();
-    const { data } = await worker.recognize(png);
-    return { text: data.text, confidence: data.confidence };
+    const task = this.pending.then(async () => {
+      const worker = await this.ready();
+      const { data } = await worker.recognize(png);
+      return { text: data.text, confidence: data.confidence };
+    });
+    this.pending = task.catch(() => {});
+    return task;
   }
 
   async dispose(): Promise<void> {
+    await this.pending;
     if (this.worker) {
-      await this.worker.terminate();
+      await (await this.worker).terminate();
       this.worker = null;
     }
   }

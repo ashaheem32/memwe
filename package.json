@@ -24,9 +24,11 @@
     "verify": "pnpm lint && pnpm typecheck && pnpm migrate && pnpm seed && pnpm test"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
     "@biomejs/biome": "^2.5.10",
     "@memwe/contracts": "workspace:*",
     "@memwe/db": "workspace:*",
+    "@memwe/storage": "workspace:*",
     "@types/node": "^22.10.2",
     "pg": "^8.13.1",
     "tsx": "^4.19.2",

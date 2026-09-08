@@ -68,6 +68,12 @@ Sprint 1 adds contextual chunk headers — one model call per document. A backfi
 test against a real corpus is exactly how a month's budget disappears in an
 afternoon.
 
+### A2. Add `ANTHROPIC_API_KEY` as a repository secret  🔑
+Same key as A, after its spend cap is set. With the secret present, CI runs
+`tests/context-live.test.ts`, which asserts that the second context pass of
+a document reads its prefix from the prompt cache (`cache_read_input_tokens`
+above zero). Without it the test skips and caching stays unproven.
+
 ### B. Sign the eight agreements  🔑  8 of 8 unsigned
 `docs/contracts.md` has `AGREED: ______` under each. Items 1–6 have a proposed
 answer already in code. This is a conversation with Bru, and the one thing in

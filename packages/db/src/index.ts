@@ -36,7 +36,7 @@ export async function installVectorParser(): Promise<void> {
   vectorParserInstalled = true;
 }
 
-export type Tenant = { orgId: string; container?: string };
+export type Tenant = { orgId: string; container?: string; containerScope?: string | null };
 
 /**
  * Run a callback inside a transaction with the tenant GUCs set, so RLS
@@ -51,9 +51,10 @@ export async function withTenant<T>(
   try {
     await client.query("begin");
     await client.query("select set_config('app.org_id', $1, true)", [tenant.orgId]);
-    if (tenant.container) {
-      await client.query("select set_config('app.container', $1, true)", [tenant.container]);
-    }
+    await client.query("select set_config('app.container', $1, true)", [tenant.container ?? ""]);
+    await client.query("select set_config('app.container_scope', $1, true)", [
+      tenant.containerScope ?? "",
+    ]);
     const out = await fn(client);
     await client.query("commit");
     return out;
@@ -86,3 +87,14 @@ export async function close(): Promise<void> {
 }
 
 export type { PoolClient } from "pg";
+
+/** Serialize short ingestion mutations within a tenant container, including hash claims. */
+export async function lockIngestion(
+  c: pg.PoolClient,
+  orgId: string,
+  container: string,
+): Promise<void> {
+  await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    JSON.stringify([orgId, container]),
+  ]);
+}

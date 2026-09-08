@@ -94,8 +94,8 @@ async function main(): Promise<void> {
       `insert into jobs (type, payload, trace_id, dedupe_key)
        select 'document.accept',
               jsonb_build_object('orgId', d.org_id, 'container', d.container,
-                                 'traceId', 'seed', 'documentId', d.id),
-              'seed', 'accept:' || d.id::text
+                                 'traceId', 'seed', 'documentId', d.id, 'revision', d.revision),
+              'seed', 'document.accept:' || d.id::text || ':' || d.revision::text
          from documents d
         where d.status = 'queued'
        on conflict do nothing`,

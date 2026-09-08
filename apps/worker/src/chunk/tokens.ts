@@ -41,7 +41,18 @@ class O200kCounter implements TokenCounter {
   truncate(text: string, max: number): string {
     if (!encoding) throw new Error("tokenizer not warmed — call warmTokenizer() first");
     const ids = encoding.encode(text);
-    return ids.length <= max ? text : encoding.decode(ids.slice(0, max));
+    if (ids.length <= max) return text;
+    // Token slices can end halfway through a UTF-8 sequence. Return an actual
+    // source prefix, never a replacement character followed by a shifted slice.
+    let lo = 0,
+      hi = text.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (encoding.encode(text.slice(0, mid)).length <= max) lo = mid;
+      else hi = mid - 1;
+    }
+    if (lo > 0 && /[\uD800-\uDBFF]/.test(text[lo - 1]!)) lo--;
+    return text.slice(0, lo);
   }
 }
 

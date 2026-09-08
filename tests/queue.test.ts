@@ -55,8 +55,8 @@ describe("PgQueue", () => {
 
   it("retry schedules into the future and does not claim early", async () => {
     const id = await q.enqueue({ type: "document.accept", payload: env, traceId: env.traceId });
-    await q.claim("w1", 1);
-    await q.retry(id!, "boom", 60_000);
+    const [job] = await q.claim("w1", 1);
+    await q.retry(job!, "boom", 60_000);
 
     expect(await q.claim("w1", 10)).toHaveLength(0);
 

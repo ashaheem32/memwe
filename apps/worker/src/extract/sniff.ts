@@ -73,7 +73,10 @@ export async function sniff(
     };
   }
 
-  if (isBinary(bytes)) {
+  const utf16Bom =
+    bytes.length >= 2 &&
+    ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff));
+  if (!utf16Bom && isBinary(bytes)) {
     return { kind: "unsupported", mime: declaredMime ?? "application/octet-stream" };
   }
 

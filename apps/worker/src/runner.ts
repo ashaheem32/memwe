@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Job } from "@memwe/contracts";
-import { isRetryable, JOB_PAYLOAD, MemweError } from "@memwe/contracts";
-import { tx } from "@memwe/db";
+import { DocumentJobPayload, isRetryable, JOB_PAYLOAD, MemweError } from "@memwe/contracts";
 import { log } from "./log.js";
 import { queue } from "./queue.js";
+import { documentTx, StaleJobError } from "./stages/guard.js";
 import { STAGES } from "./stages/index.js";
 import { nextStage } from "./stages/pipeline.js";
-import { advanceStatus, failDocument, STAGE_STATUS } from "./status.js";
+import { advanceStatus, failDocument, STAGE_STATUS, STATUS_ORDER } from "./status.js";
 
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4);
 const POLL_MS = Number(process.env.WORKER_POLL_MS ?? 500);
@@ -30,7 +30,7 @@ export class Runner {
 
     this.timers.push(
       setInterval(() => {
-        void queue.heartbeat([...this.inflight.keys()]).catch((e: unknown) => {
+        void queue.heartbeat([...this.inflight.values()]).catch((e: unknown) => {
           log.error("heartbeat failed", { err: String(e) });
         });
       }, HEARTBEAT_MS),
@@ -38,9 +38,12 @@ export class Runner {
 
     this.timers.push(
       setInterval(() => {
-        void queue.reap(STALE_MS).then((n) => {
-          if (n > 0) log.warn("reaped stale jobs", { count: n });
-        });
+        void queue
+          .reap(STALE_MS)
+          .then((n) => {
+            if (n > 0) log.warn("reaped stale jobs", { count: n });
+          })
+          .catch((err) => log.error("reaper failed", { err: String(err) }));
       }, STALE_MS),
     );
 
@@ -67,101 +70,100 @@ export class Runner {
 
       for (const job of jobs) {
         this.inflight.set(job.id, job);
-        void this.run(job).finally(() => this.inflight.delete(job.id));
+        void this.run(job)
+          .catch((err) => log.error("job recovery failed", { err: String(err) }))
+          .finally(() => this.inflight.delete(job.id));
       }
     }
   }
 
-  private async run(job: Job): Promise<void> {
+  /** Public for integration tests that exercise the same dispatch path as the poller. */
+  async run(job: Job): Promise<void> {
     const jlog = log.child({ jobId: job.id, type: job.type, traceId: job.traceId });
     const started = Date.now();
-
     try {
       const stage = STAGES[job.type];
-      if (!stage) {
-        // Unregistered type: never retry. Retrying a job nothing can
-        // handle just burns five attempts and hides the real problem.
-        throw new MemweError("invalid_request", `no stage registered for ${job.type}`);
+      if (!stage) throw new MemweError("invalid_request", `no stage registered for ${job.type}`);
+      job.payload = JOB_PAYLOAD[job.type].parse(job.payload);
+      const parsed = DocumentJobPayload.safeParse(job.payload);
+      if (parsed.success) {
+        const p = parsed.data;
+        await documentTx(job, async (c) => {
+          const status = STAGE_STATUS[job.type];
+          if (!status) return;
+          const r = await c.query<{ status: typeof status }>(
+            "select status from documents where id=$1",
+            [p.documentId],
+          );
+          if (STATUS_ORDER.indexOf(r.rows[0]!.status) > STATUS_ORDER.indexOf(status)) {
+            throw new StaleJobError("stage already passed");
+          }
+          await advanceStatus(c, p.documentId, status);
+        });
       }
-
-      const schema = JOB_PAYLOAD[job.type];
-      job.payload = schema.parse(job.payload) as unknown;
-      const documentId = this.documentIdOf(job);
-
-      // The runner owns the status machine, not the stages. Each stage
-      // writing its own status is how three of the seven declared states
-      // stayed unused while documents reported `extracting` for the whole
-      // run. Set at dispatch, so the status is what is actually running.
-      const status = STAGE_STATUS[job.type];
-      if (documentId && status) {
-        await tx((c) => advanceStatus(c, documentId, status));
-      }
-
       const result = await stage(job, { log: jlog });
-      await queue.complete(job.id);
-
-      // Advancement is the runner's too, so a stage never has to know what
-      // follows it and three stages stop repeating the same block.
-      if (result && "halt" in result) {
-        jlog.info("pipeline halted", { reason: result.reason });
-      } else if (documentId) {
-        await this.advance(job, documentId, jlog);
-      }
-
-      jlog.info("job done", { ms: Date.now() - started });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const exhausted = job.attempts >= job.maxAttempts;
-      const retry = isRetryable(err) && !exhausted;
-
-      if (retry) {
-        const delay = backoffMs(job.attempts);
-        await queue.retry(job.id, message, delay);
-        jlog.warn("job failed, retrying", {
-          err: message,
-          attempt: job.attempts,
-          retryInMs: delay,
+      if (parsed.success) {
+        const p = parsed.data;
+        await documentTx(job, async (c) => {
+          if (result && "deferMs" in result) {
+            await c.query(
+              `update jobs set status='pending',max_attempts=max_attempts+1,
+              run_at=now()+make_interval(secs=>$2::float8),locked_by=null,heartbeat_at=null
+              where id=$1`,
+              [job.id, result.deferMs / 1000],
+            );
+            return;
+          }
+          if (!(await queue.complete(job, c))) throw new StaleJobError("lease lost before handoff");
+          const next = nextStage(job.type);
+          if (result && "halt" in result) {
+            await advanceStatus(c, p.documentId, "done");
+          } else if (next) {
+            await queue.enqueue(
+              {
+                type: next,
+                payload: p,
+                traceId: job.traceId,
+                dedupeKey: `${next}:${p.documentId}:${p.revision}`,
+              },
+              c,
+            );
+          } else {
+            await advanceStatus(c, p.documentId, "done");
+          }
         });
       } else {
-        await queue.kill(job.id, message);
-        // A dead job on a document must fail the document too. Otherwise it
-        // sits mid-pipeline forever, invisible to anyone looking at the API
-        // and indistinguishable from work still in progress.
-        await this.failDocument(job, message, jlog);
-        jlog.error("job dead", { err: message, attempts: job.attempts, exhausted });
+        await queue.complete(job);
       }
-    }
-  }
-
-  private documentIdOf(job: Job): string | null {
-    const payload = job.payload as { documentId?: unknown };
-    return typeof payload?.documentId === "string" ? payload.documentId : null;
-  }
-
-  private async advance(job: Job, documentId: string, jlog: typeof log): Promise<void> {
-    const next = nextStage(job.type);
-    if (next) {
-      await queue.enqueue({
-        type: next,
-        payload: job.payload as Record<string, unknown>,
-        traceId: job.traceId,
-        dedupeKey: `${next}:${documentId}`,
-      });
-      return;
-    }
-    // Nothing further is registered, so the pipeline is complete for this
-    // document as currently built.
-    const moved = await tx((c) => advanceStatus(c, documentId, "done"));
-    if (moved) jlog.debug("pipeline complete", { documentId });
-  }
-
-  private async failDocument(job: Job, error: string, jlog: typeof log): Promise<void> {
-    const documentId = this.documentIdOf(job);
-    if (!documentId) return;
-    try {
-      await tx((c) => failDocument(c, documentId, job.type, error));
+      jlog.info("job done", { ms: Date.now() - started });
     } catch (err) {
-      jlog.error("could not mark document failed", { err: String(err) });
+      if (err instanceof StaleJobError) {
+        await queue.complete(job);
+        jlog.info("obsolete job skipped", { reason: err.message });
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      if (isRetryable(err) && job.attempts < job.maxAttempts) {
+        await queue.retry(job, message, backoffMs(job.attempts));
+        jlog.warn("job failed, retrying", { err: message, attempt: job.attempts });
+      } else {
+        const parsed = DocumentJobPayload.safeParse(job.payload);
+        if (parsed.success) {
+          try {
+            await documentTx(job, async (c) => {
+              if (await queue.kill(job, message, c)) {
+                await failDocument(c, parsed.data.documentId, job.type, message);
+              }
+            });
+          } catch (failure) {
+            if (!(failure instanceof StaleJobError)) throw failure;
+            await queue.kill(job, message);
+          }
+        } else {
+          await queue.kill(job, message);
+        }
+        jlog.error("job dead", { err: message });
+      }
     }
   }
 

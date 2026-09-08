@@ -77,6 +77,9 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
       doc,
       stats: {
         format: "pdf",
+        contentTitle: r.title,
+        totalPages: r.totalPages,
+        partial: r.totalPages > r.pages || r.ocrSkipped.length > 0,
         pages: r.pages,
         headings: r.headings,
         ocrPages: r.ocrPages.length,
@@ -94,7 +97,10 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
   const map = new SpanMap();
   // Markdown is authored, so its line breaks are meaningful and a trailing
   // hyphen is a real one. Only PDFs get de-hyphenated.
-  const markdown = normalizeText(text, map, bomStripped ? 3 : 0, { dehyphenate: false });
+  const markdown = normalizeText(text, map, bomStripped ? 1 : 0, {
+    dehyphenate: false,
+    authoredMarkdown: detected.kind === "markdown",
+  });
 
   if (markdown.trim().length === 0) {
     throw new MemweError("unsupported_content", "document is empty after decoding");
@@ -118,6 +124,7 @@ export async function extract(input: ExtractInput, log: Logger): Promise<Extract
     doc,
     stats: {
       format: detected.kind,
+      contentTitle: title,
       encoding,
       bomStripped,
       sections: sections.length,

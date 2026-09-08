@@ -24,6 +24,8 @@ export const STAGE_STATUS: Partial<Record<JobType, DocStatus>> = {
   "document.accept": "queued",
   "document.extract": "extracting",
   "document.chunk": "chunking",
+  // Context is part of producing a chunk; the status stays put.
+  "document.contextualize": "chunking",
   "document.embed": "embedding",
   "document.index": "indexing",
 };
@@ -107,7 +109,7 @@ export async function failDocument(
 export async function reprocess(client: PoolClient, documentId: string): Promise<boolean> {
   const { rowCount } = await client.query(
     `update documents
-        set status = 'queued', stage_error = null, failed_stage = null,
+        set status = 'queued', revision = revision + 1, stage_error = null, failed_stage = null,
             status_changed_at = now(), updated_at = now()
       where id = $1 and status in ('done', 'failed')`,
     [documentId],

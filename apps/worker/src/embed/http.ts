@@ -16,6 +16,7 @@ type HttpConfig = {
   maxBatchTokens: number;
   /** Providers that distinguish indexing from searching get better recall. */
   supportsInputType: boolean;
+  maxInputTokens?: number;
 };
 
 /**
@@ -30,9 +31,11 @@ export class HttpEmbedding implements EmbeddingProvider {
   readonly maxBatchSize: number;
   readonly maxBatchTokens: number;
   readonly metered = true;
+  readonly maxInputTokens: number;
 
   constructor(private readonly cfg: HttpConfig) {
     this.id = cfg.id;
+    this.maxInputTokens = cfg.maxInputTokens ?? 8191;
     this.dimensions = cfg.dimensions;
     this.maxBatchSize = cfg.maxBatchSize;
     this.maxBatchTokens = cfg.maxBatchTokens;
@@ -47,10 +50,16 @@ export class HttpEmbedding implements EmbeddingProvider {
       // A batch is all one kind — the stage never mixes them.
       body["input_type"] = inputs[0]?.kind === "query" ? "query" : "document";
     }
-    if (this.cfg.dimensions !== 0) body["dimensions"] = this.cfg.dimensions;
+    if (this.cfg.dimensions !== 0)
+      body[this.cfg.supportsInputType ? "output_dimension" : "dimensions"] = this.cfg.dimensions;
+    if (this.cfg.supportsInputType) body.truncation = false;
+    const timeout = Number(process.env.EMBED_TIMEOUT_MS ?? 30000);
+    if (!Number.isInteger(timeout) || timeout <= 0)
+      throw new MemweError("invalid_request", "invalid EMBED_TIMEOUT_MS");
 
     const res = await fetch(this.cfg.url, {
       method: "POST",
+      signal: AbortSignal.timeout(timeout),
       headers: {
         authorization: `Bearer ${this.cfg.apiKey}`,
         "content-type": "application/json",
@@ -86,6 +95,8 @@ export class HttpEmbedding implements EmbeddingProvider {
     const out: number[][] = new Array(inputs.length);
     rows.forEach((row, i) => {
       const at = row.index ?? i;
+      if (!Number.isInteger(at) || at < 0 || at >= inputs.length || out[at] !== undefined)
+        throw new MemweError("upstream_failed", "invalid embedding response index");
       out[at] = row.embedding ?? [];
     });
     assertDimensions(out, this.dimensions, this.id);
@@ -103,6 +114,7 @@ export function voyage(apiKey: string, model = "voyage-3-large"): HttpEmbedding 
     maxBatchSize: 128,
     maxBatchTokens: 120_000,
     supportsInputType: true,
+    maxInputTokens: 32000,
   });
 }
 
